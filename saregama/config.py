@@ -11,8 +11,8 @@ from typing import List, Optional
 @dataclass
 class SeparationCfg:
     backend: str = "soulx"            # soulx | audio_separator | none
-    soulx_repo: str = "../SoulX-Singer"
-    soulx_models: str = "../SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess"
+    soulx_repo: str = "/home/kartiksingh/Gokul/624/SoulX-Singer"
+    soulx_models: str = "/home/kartiksingh/Gokul/624/SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess"
     dereverb: bool = True
     audio_separator_model: str = "mel_band_roformer_karaoke_becruily.ckpt"
     device: str = "cuda"
@@ -21,7 +21,7 @@ class SeparationCfg:
 @dataclass
 class F0Cfg:
     backends: List[str] = field(default_factory=lambda: ["rmvpe", "yin"])
-    rmvpe_model: str = "../SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt"
+    rmvpe_model: str = "/home/kartiksingh/Gokul/624/SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt"
     fmin: float = 60.0
     fmax: float = 1400.0
     agree_cents: float = 50.0          # ensemble members "agree" within this

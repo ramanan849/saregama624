@@ -1,4 +1,4 @@
-"""Command line: ``svs-annotate <command> ...`` (or ``python -m saregama``)."""
+"""Command line: ``saregama <command> ...`` (or ``python -m saregama``)."""
 from __future__ import annotations
 
 import argparse
@@ -10,6 +10,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .config import load_config
+from .ir import DEFAULT_ROOT as ANN_ROOT
+from .saraga import DEFAULT_ROOT as SARAGA_ROOT
 
 SONGS_HEADER = ["song_id", "audio", "language", "lyrics", "style", "singer_id", "gender",
                 "vocal_only", "tonic_hz", "source", "license"]
@@ -211,11 +213,272 @@ def cmd_g2p(a):
         print(f"{s.text}\t{'-'.join(s.phones)}")
 
 
+# ----------------------------------------------------------------------------- Saraga
+
+def _saraga_recs(a):
+    from .saraga import scan
+    recs = [r for r in scan(a.saraga_root) if r.has_stems or not a.stems_only]
+    if a.mbids:
+        keep = set(Path(a.mbids).read_text().split()) if Path(a.mbids).exists() else set(a.mbids.split(","))
+        recs = [r for r in recs if r.mbid in keep]
+    return recs
+
+
+def cmd_manifest(a):
+    from .saraga import scan, write_manifest
+    recs = scan(a.saraga_root)
+    out = Path(a.ann_root) / "manifest.csv"
+    write_manifest(recs, out)
+    print(f"{len(recs)} recordings ({sum(r.has_stems for r in recs)} with stems) -> {out}")
+
+
+def cmd_sync(a):
+    from .ir import init_bundle
+    from .stages.sync import bleed_scores, estimate_offsets, write_aligned_stems
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = init_bundle(r, a.ann_root)
+        if b.stage_done("sync") and not a.force:
+            continue
+        res = estimate_offsets(r.mix, r.stems)
+        paths = write_aligned_stems(r.mix, r.stems, res.offset_s, b.stems_dir)
+        bleed = bleed_scores(paths)
+        ir = b.load()
+        ir["sync"] = res.to_json()
+        ir["stems"] = {k: {"path": str(p.relative_to(b.dir)), "source": str(r.stems.get(k, "")),
+                           "bleed": bleed.get(k, {})} for k, p in paths.items()}
+        ir["flags"] = sorted(set(ir.get("flags", [])) | {f"sync:{f}" for f in res.flags})
+        b.save(ir)
+        b.mark("sync", offset_ms=round(res.offset_s * 1000, 3), flags=res.flags)
+        print(f"[{i}/{len(recs)}] {r.title}: offset {res.offset_s * 1000:+.2f} ms "
+              f"from {','.join(res.consensus_stems)} {' '.join(res.flags)}", flush=True)
+
+
+def cmd_stems(a):
+    from .config import SeparationCfg
+    from .ir import Bundle
+    from .stages.separate import Separator, clean_stem
+    sep = Separator(SeparationCfg(device=a.device))
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("sync"):
+            print(f"[{i}/{len(recs)}] {r.title}: run sync first", flush=True)
+            continue
+        if b.stage_done("stems") and not a.force:
+            continue
+        ir = b.load()
+        stats = {}
+        for k in ("vocal", "vocal-s"):
+            if k not in ir["stems"]:
+                continue
+            name = "vocal_clean" if k == "vocal" else "vocal-s_clean"
+            out = b.stems_dir / f"{name}.flac"
+            stats[name] = clean_stem(sep, b.dir / ir["stems"][k]["path"], out)
+            ir["stems"][name] = {"path": str(out.relative_to(b.dir)), "from": k, **stats[name]}
+        b.save(ir)
+        b.mark("stems", **stats)
+        print(f"[{i}/{len(recs)}] {r.title}: {stats}", flush=True)
+
+
+def cmd_f0(a):
+    from .config import F0Cfg, SeparationCfg
+    from .ir import F0_HZ, Bundle
+    from .stages.f0 import F0Estimator
+    from .stages.f0_ir import run_f0
+    cfg = F0Cfg(backends=a.backends.split(","), device=a.device)
+    est = F0Estimator(cfg, SeparationCfg().soulx_repo, fps=F0_HZ)
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("stems"):
+            print(f"[{i}/{len(recs)}] {r.title}: run stems first", flush=True)
+            continue
+        if b.stage_done("f0") and not a.force:
+            continue
+        rep = run_f0(b, est, r.pitch())
+        ir = b.mark("f0", backends=cfg.backends)
+        print(f"[{i}/{len(recs)}] {r.title}: tonic {ir['tonic_hz']} ({ir['tonic_source']}, "
+              f"histogram {ir.get('tonic_histogram_hz')}) {json.dumps(rep)}", flush=True)
+
+
+def cmd_swaras(a):
+    import numpy as np
+    from .ir import Bundle
+    from .stages.swaras import flatten, segment, to_json
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("f0"):
+            print(f"[{i}/{len(recs)}] {r.title}: run f0 first", flush=True)
+            continue
+        if b.stage_done("swaras") and not a.force:
+            continue
+        ir = b.load()
+        z = np.load(b.path("f0_100hz.npz"))
+        segs, pos = segment(z["cents"].astype(float), ir.get("raaga", ""), float(z["fps"]))
+        sw = to_json(segs, pos, ir.get("raaga", ""))
+        b.path("swaras.json").write_text(json.dumps(sw, ensure_ascii=False), encoding="utf-8")
+        np.savez_compressed(b.path("flat_100hz.npz"), fps=z["fps"],
+                            flat_cents=flatten(segs, len(z["cents"]), pos, float(z["fps"])))
+        ir = b.load()
+        ir.setdefault("qc", {})["swaras"] = sw["summary"]
+        b.save(ir)
+        b.mark("swaras", n_segments=len(segs))
+        print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(sw['summary']['share'])} "
+              f"positions {json.dumps(pos)}", flush=True)
+
+
+def cmd_viz(a):
+    from .ir import Bundle
+    from .viz import contour_pdf
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("swaras"):
+            continue
+        ir = b.load()
+        sw = json.loads(b.path("swaras.json").read_text(encoding="utf-8"))
+        syl = []
+        if b.path("lyrics.json").exists():
+            lyr = json.loads(b.path("lyrics.json").read_text(encoding="utf-8"))
+            syl = [x for line in lyr.get("lines", []) for x in line.get("syllables", [])]
+        out = contour_pdf(b.review_dir / "contour.pdf", ir["title"], ir["tonic_hz"], ir.get("raaga", ""),
+                          b.path("f0_100hz.npz"), sw, ir.get("sections", []), ir.get("sama", []), syl,
+                          max_pages=a.max_pages or None)
+        print(f"[{i}/{len(recs)}] {r.title}: {out}", flush=True)
+
+
+def cmd_lyrics_fetch(a):
+    from .lyrics_fetch import Fetcher, fetch_work, karnatik_index
+    out_dir = Path(a.lyrics_dir)
+    f = Fetcher(out_dir / "_cache")
+    index = karnatik_index(f)
+    works = {}
+    for r in _saraga_recs(a):
+        if r.work_mbid and r.work_mbid not in works:
+            works[r.work_mbid] = r
+    rows = []
+    for i, (wm, r) in enumerate(works.items(), 1):
+        try:
+            doc = fetch_work(f, index, wm, r.work_title or r.title, r.raaga, out_dir)
+        except Exception as e:
+            print(f"[{i}/{len(works)}] error    {r.work_title or r.title}: {e!r}", flush=True)
+            rows.append([wm, r.work_title or r.title, r.raaga, "", "error", "", "", "", ""])
+            continue
+        best = doc["candidates"][0] if doc["candidates"] else {}
+        status = "verified" if doc.get("verified") else ("auto" if doc.get("selected") else "missing")
+        rows.append([wm, r.work_title or r.title, r.raaga, "; ".join(doc["musicbrainz"].get("composer", [])),
+                     status, best.get("title", ""), best.get("raga", ""), best.get("score", ""), best.get("url", "")])
+        print(f"[{i}/{len(works)}] {status:8s} {r.work_title or r.title} ({r.raaga}) -> "
+              f"{best.get('title', '-')} / {best.get('raga', '-')} {best.get('score', '')}", flush=True)
+    with open(out_dir / "status.tsv", "w", encoding="utf-8") as fh:
+        fh.write("work_mbid\ttitle\traga\tcomposer\tstatus\tbest_title\tbest_raga\tscore\turl\n")
+        for row in rows:
+            fh.write("\t".join(map(str, row)) + "\n")
+    print(json.dumps(Counter(r[4] for r in rows)))
+
+
+def cmd_lyrics_verify(a):
+    """Show the candidates of one work and record the reviewer's choice."""
+    import yaml
+    path = Path(a.lyrics_dir) / f"{a.work}.yaml"
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if a.pick is None and not a.text:
+        print(f"{doc['title']}  |  {doc['raga']}  |  composer {doc['musicbrainz'].get('composer')}")
+        for i, c in enumerate(doc["candidates"]):
+            print(f"\n[{i}] {c['title']} / {c['raga']} / {c['composer']}  score {c['score']}  {c['url']}")
+            for sec in c.get("parsed", {}).get("sections", []):
+                print(f"   {sec['name']}: " + " | ".join(sec["lines"]))
+        print(f"\nselected: {doc.get('selected')}  verified: {doc.get('verified')}")
+        return
+    if a.text:
+        sections, cur = [], None
+        for line in Path(a.text).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith(":"):
+                cur = {"name": line[:-1], "lines": []}
+                sections.append(cur)
+            else:
+                if cur is None:
+                    cur = {"name": "pallavi", "lines": []}
+                    sections.append(cur)
+                cur["lines"].append(line)
+        doc.update(selected=a.source or str(a.text), source="manual", lyrics=sections)
+    else:
+        c = doc["candidates"][a.pick]
+        doc.update(selected=c["url"], source="karnatik", lyrics=c["parsed"]["sections"])
+    doc.update(verified=True, verified_by=a.reviewer, notes=a.notes or doc.get("notes", ""))
+    path.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
+    print(f"verified {doc['title']} <- {doc['selected']}")
+
+
+def cmd_align(a):
+    import numpy as np
+    import soundfile as sf
+    import yaml
+    from .audio import resample
+    from .ir import Bundle
+    from .stages.align_kriti import AlignCfgK, MmsEmitter, align_regions, lyric_lines, to_json
+    cfg = AlignCfgK(device=a.device, filler_logp=a.filler_logp)
+    em = None
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("stems"):
+            print(f"[{i}/{len(recs)}] {r.title}: run stems first", flush=True)
+            continue
+        if b.stage_done("align") and not a.force:
+            continue
+        lpath = Path(a.lyrics_dir) / f"{r.work_mbid}.yaml"
+        doc = yaml.safe_load(lpath.read_text(encoding="utf-8")) if lpath.exists() else None
+        if not doc or not doc.get("lyrics"):
+            print(f"[{i}/{len(recs)}] {r.title}: no lyrics selected ({lpath.name})", flush=True)
+            continue
+        lines = lyric_lines(doc["lyrics"])
+        emit_path = b.path("mms_50hz.npz")
+        if emit_path.exists():
+            logp = np.load(emit_path)["logp"].astype(np.float32)
+        else:
+            em = em or MmsEmitter(cfg)
+            ir = b.load()
+            x, sr = sf.read(str(b.dir / ir["stems"]["vocal_clean"]["path"]), dtype="float32")
+            logp = em(resample(x, sr, 16000))
+            np.savez_compressed(emit_path, logp=logp.astype(np.float16))
+        ir = b.load()
+        regions = ir.get("sections") or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}]
+        import torchaudio
+        vocab = dict(torchaudio.pipelines.MMS_FA.get_dict(star=None))
+        inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
+        src = {"work_mbid": r.work_mbid, "selected": doc.get("selected"), "source": doc.get("source"),
+               "verified": bool(doc.get("verified"))}
+        b.path("lyrics.json").write_text(json.dumps(to_json(lines, inst, rep, src), ensure_ascii=False),
+                                         encoding="utf-8")
+        lyric_s = sum(x.end - x.start for x in inst)
+        summ = {"instances": len(inst), "lyric_s": round(lyric_s, 1),
+                "low_conf": sum("low_conf" in x.flags for x in inst),
+                "mean_llr": round(float(np.mean([x.llr for x in inst])), 3) if inst else None,
+                "lines_seen": sorted({x.line_id for x in inst}), "n_lines": len(lines),
+                "lyrics_verified": src["verified"]}
+        ir = b.load()
+        ir.setdefault("qc", {})["align"] = summ
+        if not src["verified"]:
+            ir["flags"] = sorted(set(ir.get("flags", [])) | {"lyrics_unverified"})
+        b.save(ir)
+        b.mark("align", **summ)
+        print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summ)}", flush=True)
+
+
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="svs-annotate", description=__doc__)
+    p = argparse.ArgumentParser(prog="saregama", description=__doc__)
     p.add_argument("--config", default=None, help="TOML config (defaults if omitted)")
     p.add_argument("--work-dir", default=None)
     p.add_argument("--out-dir", default=None)
+    p.add_argument("--saraga-root", default=str(SARAGA_ROOT))
+    p.add_argument("--ann-root", default=str(ANN_ROOT), help="where per-recording IR bundles live")
+    p.add_argument("--lyrics-dir", default=str(ANN_ROOT.parent / "lyrics"), help="per-work lyric YAMLs")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="create a workspace with templates")
@@ -282,6 +545,57 @@ def main(argv=None):
     s.add_argument("text")
     s.add_argument("--lang", required=True, choices=["hi", "mr", "ta"])
     s.set_defaults(fn=cmd_g2p)
+
+    s = sub.add_parser("manifest", help="index Saraga Carnatic recordings -> <ann-root>/manifest.csv")
+    s.set_defaults(fn=cmd_manifest)
+
+    s = sub.add_parser("sync", help="measure stem offsets, write mix-aligned FLAC stems")
+    s.add_argument("--mbids", default="", help="comma-separated mbids or a file of mbids")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_sync, stems_only=True)
+
+    s = sub.add_parser("stems", help="de-bleed and de-reverb the vocal stem(s) (Mel-RoFormer)")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--device", default="cuda")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_stems, stems_only=True)
+
+    s = sub.add_parser("f0", help="100 Hz F0 ensemble on the cleaned vocal stem(s), tonic, cents")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--backends", default="rmvpe,fcpe,crepe")
+    s.add_argument("--device", default="cuda")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_f0, stems_only=True)
+
+    s = sub.add_parser("swaras", help="raga-aware swara segments + flat contour")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_swaras, stems_only=True)
+
+    s = sub.add_parser("viz", help="contour sheets (review/contour.pdf)")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--max-pages", type=int, default=0)
+    s.set_defaults(fn=cmd_viz, stems_only=True)
+
+    s = sub.add_parser("lyrics-fetch", help="candidate lyrics per Saraga work (MusicBrainz + karnatik.com)")
+    s.add_argument("--mbids", default="")
+    s.set_defaults(fn=cmd_lyrics_fetch, stems_only=True)
+
+    s = sub.add_parser("lyrics-verify", help="show a work's lyric candidates, or record the right one")
+    s.add_argument("--work", required=True, help="work mbid")
+    s.add_argument("--pick", type=int, default=None, help="candidate index to accept")
+    s.add_argument("--text", default="", help="lyrics file (section lines end with ':') from another source")
+    s.add_argument("--source", default="", help="URL/citation for --text")
+    s.add_argument("--reviewer", default="")
+    s.add_argument("--notes", default="")
+    s.set_defaults(fn=cmd_lyrics_verify)
+
+    s = sub.add_parser("align", help="line-loop CTC alignment of the (selected) lyrics")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--device", default="cuda")
+    s.add_argument("--filler-logp", type=float, default=-3.0)
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_align, stems_only=True)
 
     a = p.parse_args(argv)
     a.fn(a)

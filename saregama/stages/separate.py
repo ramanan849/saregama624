@@ -105,3 +105,26 @@ def leakage_score(vocals: np.ndarray, accomp: Optional[np.ndarray], f0: np.ndarr
         return 0.0
     lin = 10 ** (energy_db / 10)
     return float(10 * np.log10(np.median(lin[~v]) + 1e-12) - 10 * np.log10(np.median(lin[v]) + 1e-12))
+
+
+def clean_stem(sep: Separator, stem_path: str | Path, out_path: str | Path) -> dict:
+    """Remove bleed (violin, mridangam, the other singer) and reverb from a
+    close-mic vocal stem.  Keeps the stem's sample rate and exact length and
+    does not normalise, so the result stays sample-aligned with the mix."""
+    import soundfile as sf
+    if sep.cfg.backend != "soulx":
+        raise ValueError("clean_stem needs the soulx backend")
+    if sep._impl is None:
+        sep._impl = sep._load_soulx()
+    x, sr = sf.read(str(stem_path), dtype="float32")
+    res = sep._impl.process(str(stem_path))
+    v = res.vocals_dereverbed if res.vocals_dereverbed is not None else res.vocals
+    v = np.asarray(v, dtype=np.float32)
+    v = v.mean(axis=0) if v.ndim == 2 else v
+    v = resample(v, int(res.sample_rate), sr)
+    v = v[:len(x)] if len(v) >= len(x) else np.pad(v, (0, len(x) - len(v)))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(out_path), v, sr, subtype="PCM_16")
+    removed = x - v
+    db = lambda y: float(10 * np.log10(np.mean(y.astype(np.float64) ** 2) + 1e-12))
+    return {"in_db": round(db(x), 2), "out_db": round(db(v), 2), "removed_db": round(db(removed), 2)}

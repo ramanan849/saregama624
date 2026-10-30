@@ -1,4 +1,5 @@
-"""Stage 2 - F0 on the 50 fps grid, from an ensemble of trackers.
+"""Stage 2 - F0 from an ensemble of trackers, on a 50 fps (SoulX) or 100 fps
+(ICM-IR master) grid.
 
 Backends
 --------
@@ -32,8 +33,8 @@ Track = Tuple[np.ndarray, np.ndarray]     # (f0 Hz with 0 = unvoiced, confidence
 # ---------------------------------------------------------------------------
 def yin(x: np.ndarray, sr: int = SR, fmin: float = 60.0, fmax: float = 1400.0,
         threshold: float = 0.15, n: Optional[int] = None,
-        silence_db: float = -55.0) -> Track:
-    hop = int(round(sr / FPS))
+        silence_db: float = -55.0, fps: float = FPS) -> Track:
+    hop = int(round(sr / fps))
     tau_min = max(2, int(sr / fmax))
     tau_max = int(np.ceil(sr / fmin))
     w = max(tau_max, int(0.025 * sr))           # integration window
@@ -86,47 +87,97 @@ def yin(x: np.ndarray, sr: int = SR, fmin: float = 60.0, fmax: float = 1400.0,
 
 
 # ---------------------------------------------------------------------------
-# neural backends (imported lazily)
+# neural backends (imported lazily).  Every backend takes 16 kHz audio, the
+# number of output frames ``n`` and the output frame rate ``fps``; frame k is
+# centred on time k / fps.
 # ---------------------------------------------------------------------------
+NN_SR = 16000
+NN_HOP = 160                     # RMVPE / FCPE native grid: 100 frames per second
+
+
+def _regrid(f: np.ndarray, n: int, fps: float) -> np.ndarray:
+    """Resample a native 100 Hz track onto ``n`` frames at ``fps`` without
+    smearing voicing: values come from linear interpolation, and a target frame
+    is unvoiced if either neighbouring native frame is."""
+    f = np.asarray(f, dtype=np.float32).reshape(-1)
+    if fps == NN_SR / NN_HOP:
+        return _fit(f, n)
+    t = np.arange(n) / fps * (NN_SR / NN_HOP)
+    i0 = np.clip(np.floor(t).astype(int), 0, len(f) - 1)
+    i1 = np.clip(i0 + 1, 0, len(f) - 1)
+    w = (t - i0).astype(np.float32)
+    out = (1 - w) * f[i0] + w * f[i1]
+    out[(f[i0] <= 0) | (f[i1] <= 0)] = 0
+    return out.astype(np.float32)
+
+
 class _Rmvpe:
-    def __init__(self, cfg: F0Cfg, soulx_repo: str):
+    """SoulX-Singer's RMVPE, run in overlapping chunks so hour-long recordings
+    fit in GPU memory.  Confidence is the peak salience per frame."""
+
+    def __init__(self, cfg: F0Cfg, soulx_repo: str, chunk_s: float = 30.0, ctx_s: float = 1.0):
         repo = Path(soulx_repo).resolve()
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
-        from preprocess.tools.f0_extraction import F0Extractor  # type: ignore
-        self.m = F0Extractor(model_path=cfg.rmvpe_model, device=cfg.device,
-                             target_sr=SR, hop_size=HOP, max_duration=3600, verbose=False)
+        from preprocess.tools.f0_extraction import RMVPE  # type: ignore
+        import torch
+        self.torch = torch
+        self.m = RMVPE(cfg.rmvpe_model, is_half=False, device=cfg.device)
+        self.thred = 0.03
+        self.chunk = int(chunk_s * NN_SR / NN_HOP)          # frames
+        self.ctx = int(ctx_s * NN_SR / NN_HOP)
 
-    def __call__(self, x: np.ndarray, n: int) -> Track:
-        x16 = resample(x, SR, 16000)
-        f16 = self.m.model.infer_from_audio(x16, thred=self.m.thred)
-        f0 = self.m.interpolate_f0(f16, original_length=len(x16), original_sr=16000,
-                                   target_sr=SR, hop_size=HOP, max_duration=3600)
-        f0 = _fit(np.asarray(f0, dtype=np.float32), n)
-        # RMVPE's linear interpolation smears onsets into unvoiced frames; mark
-        # frames where the 16 kHz track is unvoiced on either side as unvoiced.
-        t16 = np.arange(len(f16)) * 0.01
-        idx = np.clip(np.searchsorted(t16, np.arange(n) / FPS), 1, len(f16) - 1)
-        uv = (f16[idx] <= 0) | (f16[idx - 1] <= 0)
-        f0[uv] = 0
-        return f0, (f0 > 0).astype(np.float32)
+    def salience(self, x16: np.ndarray) -> np.ndarray:
+        total = len(x16) // NN_HOP + 1
+        out = np.zeros((total, 360), dtype=np.float32)
+        with self.torch.no_grad():
+            for f0 in range(0, total, self.chunk):
+                a = max(0, f0 - self.ctx)
+                b = min(total, f0 + self.chunk + self.ctx)
+                seg = x16[a * NN_HOP:max(a * NN_HOP + 1, (b - 1) * NN_HOP + 1)]
+                mel = self.m.mel_extractor(self.torch.from_numpy(seg).float().to(self.m.device)[None],
+                                           center=True)
+                h = self.m.mel2hidden(mel).squeeze(0).float().cpu().numpy()
+                keep = min(self.chunk, total - f0)
+                out[f0:f0 + keep] = h[f0 - a:f0 - a + keep]
+        return out
+
+    def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        sal = self.salience(x16)
+        f = self.m.decode(sal, thred=self.thred).astype(np.float32)
+        conf = sal.max(axis=1)
+        conf[f <= 0] = 0
+        g = _regrid(f, n, fps)
+        if fps == NN_SR / NN_HOP:
+            return g, _fit(conf, n)
+        return g, (g > 0).astype(np.float32)
 
 
 class _Fcpe:
-    def __init__(self, cfg: F0Cfg):
+    def __init__(self, cfg: F0Cfg, chunk_s: float = 60.0):
         import torch
         from torchfcpe import spawn_bundled_infer_model  # type: ignore
         self.torch = torch
         self.cfg = cfg
         self.m = spawn_bundled_infer_model(device=cfg.device)
+        self.chunk = int(chunk_s * NN_SR / NN_HOP)
 
-    def __call__(self, x: np.ndarray, n: int) -> Track:
-        t = self.torch.from_numpy(resample(x, SR, 16000)).float()[None, :, None].to(self.cfg.device)
-        f0 = self.m.infer(t, sr=16000, decoder_mode="local_argmax", threshold=0.006,
-                          f0_min=self.cfg.fmin, f0_max=self.cfg.fmax, interp_uv=False,
-                          output_interp_target_length=n)
-        f0 = f0.squeeze().cpu().numpy().astype(np.float32)
-        return _fit(f0, n), (f0 > 0).astype(np.float32)
+    def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        total = len(x16) // NN_HOP + 1
+        f = np.zeros(total, dtype=np.float32)
+        for f0 in range(0, total, self.chunk):
+            seg = x16[f0 * NN_HOP:(f0 + self.chunk) * NN_HOP]
+            if len(seg) < NN_HOP * 4:
+                continue
+            m = min(self.chunk, total - f0)
+            t = self.torch.from_numpy(seg).float()[None, :, None].to(self.cfg.device)
+            with self.torch.no_grad():
+                y = self.m.infer(t, sr=NN_SR, decoder_mode="local_argmax", threshold=0.006,
+                                 f0_min=self.cfg.fmin, f0_max=self.cfg.fmax, interp_uv=False,
+                                 output_interp_target_length=m)
+            f[f0:f0 + m] = y.squeeze().cpu().numpy()[:m]
+        g = _regrid(f, n, fps)
+        return g, (g > 0).astype(np.float32)
 
 
 class _Crepe:
@@ -135,15 +186,16 @@ class _Crepe:
         import torchcrepe  # type: ignore
         self.torch, self.tc, self.cfg = torch, torchcrepe, cfg
 
-    def __call__(self, x: np.ndarray, n: int) -> Track:
-        x16 = self.torch.from_numpy(resample(x, SR, 16000)).float()[None]
-        pitch, per = self.tc.predict(x16, 16000, hop_length=320, fmin=self.cfg.fmin,
+    def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        pitch, per = self.tc.predict(self.torch.from_numpy(x16).float()[None], NN_SR,
+                                     hop_length=NN_HOP, fmin=self.cfg.fmin,
                                      fmax=self.cfg.fmax, model="full", batch_size=512,
                                      device=self.cfg.device, return_periodicity=True)
-        pitch = _fit(pitch.squeeze(0).cpu().numpy(), n)
-        per = _fit(per.squeeze(0).cpu().numpy(), n)
+        pitch = pitch.squeeze(0).cpu().numpy()
+        per = per.squeeze(0).cpu().numpy()
         pitch[per < 0.5] = 0
-        return pitch.astype(np.float32), per.astype(np.float32)
+        g = _regrid(pitch, n, fps)
+        return g, (g > 0).astype(np.float32)
 
 
 def _fit(a: np.ndarray, n: int) -> np.ndarray:
@@ -255,12 +307,16 @@ def fill_short_gaps(f0: np.ndarray, max_gap: int, max_jump_cents: float = 300.0)
 
 
 class F0Estimator:
-    def __init__(self, cfg: F0Cfg, soulx_repo: str = "../SoulX-Singer", annotator=None):
+    """``fps`` sets the output grid: 50 for SoulX clips, 100 for the ICM-IR master."""
+
+    def __init__(self, cfg: F0Cfg, soulx_repo: str = "../SoulX-Singer", annotator=None,
+                 fps: float = FPS):
         self.cfg = cfg
+        self.fps = fps
         self.backends = {}
         for name in cfg.backends:
             if name == "yin":
-                self.backends[name] = lambda x, n: yin(x, SR, cfg.fmin, cfg.fmax, n=n)
+                self.backends[name] = lambda x16, n, fps: yin(x16, NN_SR, cfg.fmin, cfg.fmax, n=n, fps=fps)
             elif name == "rmvpe":
                 self.backends[name] = _Rmvpe(cfg, soulx_repo)
             elif name == "fcpe":
@@ -270,19 +326,24 @@ class F0Estimator:
             elif name == "annotator":
                 if annotator is None:
                     raise ValueError("f0 backend 'annotator' needs a loaded annotator model")
-                self.backends[name] = lambda x, n: annotator.f0(x, n)
+                self.backends[name] = lambda x16, n, fps: annotator.f0(resample(x16, NN_SR, SR), n)
             else:
                 raise ValueError(f"unknown f0 backend {name!r}")
 
-    def __call__(self, vocals: np.ndarray) -> Dict[str, np.ndarray]:
-        n = n_frames(len(vocals))
-        tracks = {k: fn(vocals, n) for k, fn in self.backends.items()}
+    def n_frames(self, n_samples: int, sr: int) -> int:
+        return int(np.ceil(n_samples / sr * self.fps))
+
+    def __call__(self, vocals: np.ndarray, sr: int = SR) -> Dict[str, np.ndarray]:
+        n = self.n_frames(len(vocals), sr)
+        x16 = resample(vocals, sr, NN_SR)
+        tracks = {k: fn(x16, n, self.fps) for k, fn in self.backends.items()}
         f0, agree = ensemble(tracks, self.cfg.backends, self.cfg.agree_cents)
         octave_fixed = 0
         if self.cfg.fix_octave_jumps:
-            f0, octave_fixed = fix_octave_islands(f0, int(self.cfg.max_octave_island_s * FPS))
-        f0 = fill_short_gaps(f0, self.cfg.fill_gap_frames)
+            f0, octave_fixed = fix_octave_islands(f0, int(self.cfg.max_octave_island_s * self.fps))
+        f0 = fill_short_gaps(f0, int(round(self.cfg.fill_gap_frames * self.fps / FPS)))
         f0[(f0 < self.cfg.fmin * 0.9) | (f0 > self.cfg.fmax * 1.1)] = 0
         return {"f0": f0.astype(np.float32), "f0_agree": agree,
                 "octave_fixed_frames": octave_fixed,
-                "tracks": {k: v[0] for k, v in tracks.items()}}
+                "tracks": {k: v[0] for k, v in tracks.items()},
+                "conf": {k: v[1] for k, v in tracks.items()}}
