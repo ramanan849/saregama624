@@ -1,0 +1,67 @@
+# svs-annotate configuration.  Every key is optional; omitted keys keep the
+# defaults from svs_annotate/config.py.  Paths are relative to where you run.
+
+work_dir = "work"        # song annotations, separated vocals, review files
+out_dir = "dataset"      # exported SoulX-Singer training set
+
+[separation]
+backend = "soulx"        # soulx | audio_separator | none
+soulx_repo = "../SoulX-Singer"
+soulx_models = "../SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess"
+dereverb = true
+device = "cuda"
+
+[f0]
+# first backend is the reference the others are octave-aligned to
+backends = ["rmvpe", "fcpe", "yin"]
+rmvpe_model = "../SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt"
+fmin = 60.0
+fmax = 1400.0
+agree_cents = 50.0
+fix_octave_jumps = true
+max_octave_island_s = 0.15
+fill_gap_frames = 2
+device = "cuda"
+
+[tonic]
+method = "histogram"
+pa_weight = 0.6
+ma_weight = 0.2
+
+[align]
+backend = "mms_fa"       # mms_fa | hf_ctc | annotator | heuristic
+hf_model = ""            # for hf_ctc
+annotator_ckpt = ""      # for annotator (round 2+)
+use_star = true          # absorb aalap / humming not in the lyric sheet
+chunk_s = 30.0
+chunk_overlap_s = 2.0
+min_gap_rest_s = 0.12
+vocalise_min_s = 0.6
+vocalise_policy = "review"   # review | drop | akaar
+device = "cuda"
+
+[notes]
+min_note_s = 0.08
+smooth_frames = 5        # stability window for note segmentation (frames)
+
+[clips]
+min_s = 2.0
+max_s = 16.0
+split_rest_s = 0.3
+pad_s = 0.1
+
+[qc]
+min_align_conf = -2.5
+min_f0_agree = 0.85
+max_octave_jump_rate = 0.02
+min_voiced_ratio = 0.35
+max_syll_rate = 12.0
+min_syll_s = 0.04
+
+[g2p]
+lexicon = ["lexicons/common.tsv"]
+keep_final_schwa = false
+delete_medial_schwa = true
+marathi_affricates = true
+tamil_initial_c_as_s = true
+tamil_intervocalic_k = "g"

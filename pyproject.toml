@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saregama"
+version = "0.1.0"
+description = "Time-synced annotation of Carnatic concert recordings (stems, F0, swaras, lyrics) into ICM-IR and SoulX-Singer training data"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.24,<2.3", "scipy>=1.10", "soundfile>=0.12", "matplotlib>=3.8", "pyyaml>=6"]
+
+[project.optional-dependencies]
+models = [
+  "torch==2.5.1",
+  "torchaudio==2.5.1",
+  "transformers>=4.40",
+  "torchfcpe",
+  "torchcrepe",
+  "librosa>=0.10",
+  "einops",
+  "huggingface_hub",
+]
+web = ["requests", "beautifulsoup4"]
+test = ["pytest"]
+
+[project.scripts]
+saregama = "saregama.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["saregama*", "annotator_model*"]

@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# project
+.venv/
+*.egg-info/
+work/
+dataset/
+annotations/
+*.flac
+*.wav
+*.mp3

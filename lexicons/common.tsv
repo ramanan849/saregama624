@@ -1,0 +1,8 @@
+# Pronunciation overrides: word<TAB>phones, with '.' between syllables.
+# Phones are the names in svs_annotate/phoneset.py (run `svs-annotate phoneset`).
+# Words listed here bypass the G2P rules - use it for sung variants, loanwords,
+# Marathi च/ज exceptions and Tamil allophony exceptions.  Examples (uncomment):
+#
+# मन	m a . n a
+# चरण	c a . r a N
+# சங்கீதம்	s a ng . g ii . t a m
