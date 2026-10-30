@@ -8,17 +8,23 @@ the CTC Viterbi here runs over a **line-loop graph**:
 
 * every lyric line is a CTC chain over romanised letters (MMS_FA emissions);
 * after each line ``l`` there is a filler state ``F_l`` that absorbs anything
-  that is not lyrics (scored at a constant ``filler_logp`` per frame, or the
-  blank, whichever is better);
+  that is not lyrics (blank or akaram vowels, at ``filler_cost`` per frame);
 * from the end of line ``l`` (directly, or after ``F_l``) the singer may enter
   line ``l'`` with a log-penalty: next line 0, same line ``repeat``, back to
   the pallavi or the start of the current section ``return``, anything else
   ``jump``;
-* a line may be left at a word boundary (``mid_exit``) and, after filler,
+* a line may be entered at a later word (``mid_entry``: sangatis and neraval
+  often start mid-line), left at a word boundary (``mid_exit``) and, after filler,
   resumed at a later word of the same line (``resume``): long melismas and
   breaths inside a line become filler instead of stretching one syllable;
-* frames in a line's blank states cost ``blank_hold`` each (MMS is >90% blank
-  on singing, so without it a line could idle in blanks for free).
+* frames in a line's gaps cost slightly more than filler (``hold_extra``;
+  MMS is >90% blank on singing), so long holds leave the line for filler;
+* letters may be skipped (``del_cost`` each): inside melisma MMS hears only
+  about a quarter of the sung letters, so the line's letter order is enforced
+  but not every letter must be heard;
+* the gaps between a line's letters also absorb the vowels and glides that
+  melisma inserts ("a-ya-ya" between the written letters) at ``insert_cost``
+  per frame.
 
 Saraga's section annotations restrict which lines can occur where (pallavi
 lines in the pallavi, anupallavi lines plus the returning pallavi in the
@@ -43,14 +49,18 @@ VOWELS = set("aeiou")
 
 @dataclass
 class AlignCfgK:
-    filler_logp: float = -3.0     # per-frame score of "not lyrics"
+    filler_cost: float = -0.1     # per-frame cost of "not lyrics" (blank or akaram vowels)
     repeat: float = -1.0
     ret: float = -2.0
     jump: float = -8.0
     mid_exit: float = -3.0        # leave a line at a word end ...
     resume: float = 0.0           # ... and come back at a later word of it (after filler)
-    blank_hold: float = -0.02     # per frame in an in-line blank: holds > ~3 s go to filler
+    mid_entry: float = -3.0       # enter a line at a later word (sangati / neraval eduppu)
+    del_cost: float = -1.0        # per letter skipped (MMS misses most letters inside melisma)
+    hold_extra: float = -0.02     # in-line gap frames cost filler_cost + this: holds > ~3 s go to filler
     merge_gap_s: float = 12.0     # resumed pieces of one line closer than this form one instance
+    insert_letters: str = "ayh"   # melismatic insertions absorbed between a line's letters ...
+    insert_cost: float = -1.0     # ... at this cost per frame (a-ya-ya articulation in gamakas)
     min_conf_llr: float = 1.0     # instances whose letter frames beat filler by less are flagged
     chunk_s: float = 30.0
     overlap_s: float = 2.0
@@ -224,6 +234,14 @@ def transition_penalties(lines: List[Line], allowed: Sequence[int], cfg: AlignCf
 
 # ----------------------------------------------------------------------------- viterbi
 
+def filler_scores(logp: np.ndarray, cfg: AlignCfgK, blank: int, insert_cols: Sequence[int] = ()) -> np.ndarray:
+    """Per-frame score of the filler: blank, or a vowel/glide (akaram), minus filler_cost."""
+    f = logp[:, blank].copy()
+    if len(insert_cols):
+        f = np.maximum(f, logp[:, list(insert_cols)].max(axis=1) + cfg.insert_cost)
+    return f + cfg.filler_cost
+
+
 def _mid_exits(g: Graph):
     """Per mid-line exit point: (line, exit token state, resume states)."""
     lines_, states, resume = [], [], []
@@ -239,7 +257,8 @@ def _mid_exits(g: Graph):
     return np.array(lines_, dtype=np.int64), np.array(states, dtype=np.int64), np.array(resume, dtype=np.int64)
 
 
-def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blank: int):
+def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blank: int,
+                 insert_cols: Sequence[int] = ()):
     """Best path through the line-loop graph.  Returns per-frame line and chain
     state (-1 for filler frames) and the path score.
 
@@ -250,11 +269,19 @@ def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blan
     S, L = len(g.lab), len(g.starts)
     mline, mstate, mres = _mid_exits(g)
     Fm = len(mline)
-    filler_emit = np.maximum(logp[:, blank], cfg.filler_logp)
+    filler_emit = filler_scores(logp, cfg, blank, insert_cols)
     emit = logp[:, g.lab].copy()                              # (T, S)
-    emit[:, g.tok < 0] += cfg.blank_hold
+    gap = g.tok < 0
+    if len(insert_cols):                                      # gaps may also carry inserted vowels
+        ins = logp[:, list(insert_cols)].max(axis=1) + cfg.insert_cost
+        emit[:, gap] = np.maximum(emit[:, gap], ins[:, None])
+    emit[:, gap] += cfg.filler_cost + cfg.hold_extra
     same1 = np.concatenate([[False], g.line_of[1:] == g.line_of[:-1]])
     same2 = np.concatenate([[False, False], g.line_of[2:] == g.line_of[:-2]]) & g.allow2
+    # deletions: token j may follow any earlier token i < j-1 of the same line at
+    # del_cost per skipped token.  With k = token index, the best source is
+    # max_i (alpha_i - del*k_i) + del*(k_j - 1), a running max along each line.
+    tokstates = [np.where((g.line_of == l) & (g.tok >= 0))[0] for l in range(L)]
     ends, last_tok = g.ends, g.ends - 1
     # source rows of P for every entry source: E_0..E_{L-1}, I, direct line ends, M_f
     src_rows = np.concatenate([np.arange(L), [L], np.arange(L), mline])
@@ -269,11 +296,13 @@ def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blan
         if P[L, l] > NEG / 2:
             alpha[g.starts[l]] = P[L, l] + emit[0, g.starts[l]]
             alpha[g.starts[l] + 1] = P[L, l] + emit[0, g.starts[l] + 1]
-    bp_chain = np.zeros((T, S), dtype=np.int8)                # 0 stay, 1 s-1, 2 s-2, 3 entry, 4 resume
+    bp_chain = np.zeros((T, S), dtype=np.int8)                # 0 stay, 1 s-1, 2 s-2, 3 entry, 4 resume, 5 s-4
     bp_entry = np.zeros((T, L), dtype=np.int32)               # index into the source list
     bp_fe = np.zeros((T, L), dtype=np.int32)                  # -1 self, else exited chain state
     bp_fm = np.zeros((T, max(Fm, 1)), dtype=np.int8)          # 0 self, 1 from exit state
     bp_lend = np.zeros((T, L), dtype=np.int32)
+    bp_del = np.zeros((T, S), dtype=np.int32)                 # source token state of a deletion jump
+    bp_del_src = np.zeros(S, dtype=np.int32)
     for t in range(1, T):
         line_end = np.maximum(alpha[ends], alpha[last_tok])
         line_end_state = np.where(alpha[ends] >= alpha[last_tok], ends, last_tok)
@@ -286,14 +315,27 @@ def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blan
         a3 = np.full(S, NEG)
         a3[g.starts] = entry
         a3[g.starts + 1] = entry
+        if len(g.word_start_states):
+            ws = g.word_start_states
+            a3[ws] = entry[g.line_of[ws]] + cfg.mid_entry
         a4 = np.full(S, NEG)
         if Fm:
             a4[mres[:, 0]] = fm + cfg.resume
             a4[mres[:, 1]] = fm + cfg.resume
-        stack = np.stack([alpha, a1, a2, a3, a4])
+        a5 = np.full(S, NEG)
+        for ts in tokstates:
+            if len(ts) < 3:
+                continue
+            k = g.tok[ts].astype(float)
+            run = np.maximum.accumulate(alpha[ts] - cfg.del_cost * k)      # best source up to i
+            a5[ts[2:]] = run[:-2] + cfg.del_cost * (k[2:] - 1)
+            bp_del_src[ts[2:]] = ts[np.maximum.accumulate(np.where(
+                alpha[ts] - cfg.del_cost * k == run, np.arange(len(ts)), 0))[:-2]]
+        stack = np.stack([alpha, a1, a2, a3, a4, a5])
         choice = np.argmax(stack, axis=0)
         new_alpha = stack[choice, np.arange(S)] + emit[t]
         bp_chain[t], bp_entry[t], bp_lend[t] = choice, best, line_end_state
+        bp_del[t] = bp_del_src
         take = line_end > fe
         bp_fe[t] = np.where(take, line_end_state, -1)
         new_fe = np.where(take, line_end, fe) + filler_emit[t]
@@ -344,6 +386,8 @@ def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blan
                     node = ("S", int(bp_lend[t, sidx - L - 1]))
                 else:
                     node = ("M", sidx - 2 * L - 1)
+            elif c == 5:
+                node = ("S", int(bp_del[t, x]))
             else:
                 node = ("S", x - int(c))
         elif kind == "E":
@@ -387,9 +431,9 @@ class Instance:
 
 
 def instances_from_path(line_path, state_path, logp, g: Graph, cfg: AlignCfgK, blank: int,
-                        t0: float = 0.0, region: str = "") -> List[Instance]:
+                        t0: float = 0.0, region: str = "", insert_cols: Sequence[int] = ()) -> List[Instance]:
     T = len(line_path)
-    filler_emit = np.maximum(logp[:, blank], cfg.filler_logp)
+    filler_emit = filler_scores(logp, cfg, blank, insert_cols)
     out = []
     t = 0
     while t < T:
@@ -427,7 +471,7 @@ def instances_from_path(line_path, state_path, logp, g: Graph, cfg: AlignCfgK, b
         inst._llr_sum = llr * (b - a)
         prev = out[-1] if out else None
         if (prev is not None and prev.line_id == inst.line_id and inst._first_pos > prev._last_pos
-                and inst.start - prev.end <= cfg.merge_gap_s and inst._first_pos > 1):
+                and not prev.complete and inst.start - prev.end <= cfg.merge_gap_s and inst._first_pos > 1):
             prev.end = inst.end
             prev.words.extend(inst.words)
             prev._last_pos = inst._last_pos
@@ -554,8 +598,10 @@ def align_regions(logp: np.ndarray, lines: List[Line], regions: List[dict], voca
         else:
             P = transition_penalties(lines, allowed, cfg)
             gg = g
-        lp, sp, score = loop_viterbi(logp[a:b], gg, P, cfg, blank)
-        inst = instances_from_path(lp, sp, logp[a:b], gg, cfg, blank, t0=a / FPS_EMIT, region=reg["label"])
+        ins = [vocab[c] for c in cfg.insert_letters if c in vocab]
+        lp, sp, score = loop_viterbi(logp[a:b], gg, P, cfg, blank, ins)
+        inst = instances_from_path(lp, sp, logp[a:b], gg, cfg, blank, t0=a / FPS_EMIT, region=reg["label"],
+                                   insert_cols=ins)
         rep["sargam"] = sum(i.section == "sargam" for i in inst)
         rep.update(instances=len(inst), lyric_s=round(sum(i.end - i.start for i in inst), 2),
                    mean_llr=round(float(np.mean([i.llr for i in inst])), 3) if inst else None)

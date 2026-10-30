@@ -423,7 +423,7 @@ def cmd_align(a):
     from .audio import resample
     from .ir import Bundle
     from .stages.align_kriti import AlignCfgK, MmsEmitter, align_regions, lyric_lines, to_json
-    cfg = AlignCfgK(device=a.device, filler_logp=a.filler_logp)
+    cfg = AlignCfgK(device=a.device, filler_cost=a.filler_cost)
     em = None
     recs = _saraga_recs(a)
     for i, r in enumerate(recs, 1):
@@ -452,7 +452,11 @@ def cmd_align(a):
         regions = ir.get("sections") or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}]
         import torchaudio
         vocab = dict(torchaudio.pipelines.MMS_FA.get_dict(star=None))
-        inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
+        if a.engine == "spikes":
+            from .stages.align_spikes import SpikeCfg, align_regions_spikes
+            inst, rep = align_regions_spikes(logp, lines, regions, vocab, vocab["-"], SpikeCfg())
+        else:
+            inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
         if b.path("f0_100hz.npz").exists():
             from .stages.align_kriti import extend_sustain
             extend_sustain(inst, np.load(b.path("f0_100hz.npz"))["f0_hz"] > 0)
@@ -463,6 +467,7 @@ def cmd_align(a):
         lyric_s = sum(x.end - x.start for x in inst)
         summ = {"instances": len(inst), "lyric_s": round(lyric_s, 1),
                 "low_conf": sum("low_conf" in x.flags for x in inst),
+                "sargam": sum(x.section == "sargam" for x in inst),
                 "mean_llr": round(float(np.mean([x.llr for x in inst])), 3) if inst else None,
                 "lines_seen": sorted({x.line_id for x in inst}), "n_lines": len(lines),
                 "lyrics_verified": src["verified"]}
@@ -471,7 +476,7 @@ def cmd_align(a):
         if not src["verified"]:
             ir["flags"] = sorted(set(ir.get("flags", [])) | {"lyrics_unverified"})
         b.save(ir)
-        b.mark("align", **summ)
+        b.mark("align", engine=a.engine, **summ)
         print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summ)}", flush=True)
 
 
@@ -640,7 +645,9 @@ def main(argv=None):
     s = sub.add_parser("align", help="line-loop CTC alignment of the (selected) lyrics")
     s.add_argument("--mbids", default="")
     s.add_argument("--device", default="cuda")
-    s.add_argument("--filler-logp", type=float, default=-3.0)
+    s.add_argument("--filler-cost", type=float, default=-0.1, help="trellis engine only")
+    s.add_argument("--engine", default="spikes", choices=["spikes", "trellis"],
+                   help="spikes: DP over MMS letter spikes (default); trellis: frame-level CTC")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_align, stems_only=True)
 

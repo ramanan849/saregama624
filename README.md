@@ -4,11 +4,16 @@ Time-synced annotation of Carnatic concert recordings (Saraga 1.5) for the IE624
 separated stems, F0 contour, swara segments and lyrics, all on one clock (the mix's),
 exported as an ICM-IR bundle per recording and as SoulX-Singer training clips.
 
-Status: **Phase 0** — the draft `indic-svs-annotator` pipeline (separation, F0 ensemble,
-tonic, CTC alignment, notes, QC, Praat review, SoulX export) has been ported here as the
-`saregama` package and its synthetic tests pass. Saraga-specific stages (loader, stem
-sync, raga-aware swaras, lyric fetching, repetition-aware alignment, Sonic Visualiser
-review) are being added next.
+Status: steps 1–6 run on a 10-recording pilot (`manifest`, `sync`, `stems`, `f0`,
+`tonic-consensus`, `swaras`, `viz`, `lyrics-fetch`, `lyrics-verify`, `align`).  Sonic
+Visualiser review export and the ICM-IR / SoulX exporters are next.
+
+Findings so far: stems sit 0–9 ms off the mix (one offset per recording, no drift);
+Saraga's `ctonic` is sometimes Pa (a fifth off), so Sa is chosen per concert; Saraga's
+`pitch.txt` timestamps lead the mix by ~13 ms; MMS hears only ~25% of the letters in
+melismatic singing, so lyrics are aligned on its letter spikes (`stages/align_spikes.py`),
+and sung sargam in kalpana svara matches the pitch track ~45% of the time (chance 16%),
+peaking within 50 ms of zero shift.
 
 ## Setup
 
