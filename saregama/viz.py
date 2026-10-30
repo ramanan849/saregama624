@@ -77,8 +77,9 @@ def _panel(ax, t, cents, segs, positions, tonic, t0, t1, ylim, sections, sama, s
     ax.plot(ss, [ylim[0]] * len(ss), marker="^", ms=4, ls="none", color=INK_2, zorder=5, clip_on=False)
     for syl in syllables:
         if t0 <= syl["start"] < t1:
-            ax.text(syl["start"], ylim[0] + 40, syl["text"], fontsize=5.5, color=INK, rotation=0,
-                    va="bottom", ha="left", zorder=6)
+            ax.text(syl["start"], ylim[0] + 40, syl["text"], fontsize=5.5,
+                    color=INK_2 if syl.get("sargam") else INK, style="italic" if syl.get("sargam") else "normal",
+                    rotation=0, va="bottom", ha="left", zorder=6)
     ax.set_xlim(t0, t1)
     ax.set_ylim(*ylim)
     ax.set_xlabel(f"{t0:.0f}-{t1:.0f} s", fontsize=6.5, color=INK_2, labelpad=1)

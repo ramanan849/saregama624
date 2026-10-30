@@ -176,19 +176,17 @@ def parse_karnatik(page: str) -> dict:
     blocks = re.split(r"(?i)<p>", body)
     sections, current = [], None
     names = {n.lower(): n for n in SECTION_NAMES}
+    is_head = lambda l: (l.strip().rstrip(":").lower() in names
+                         or re.fullmatch(r"(caraNam|charanam)\s*\d*:?", l.strip(), re.I) is not None)
     for blk in blocks:
-        lines = _text(blk)
-        if not lines:
-            continue
-        head = lines[0].strip().rstrip(":").lower()
-        if len(lines) == 1 and (head in names or re.fullmatch(r"(caraNam|charanam)\s*\d*", lines[0], re.I)):
-            current = {"name": lines[0].strip().rstrip(":"), "lines": []}
-            sections.append(current)
-            continue
-        if current is None:
-            current = {"name": "pallavi", "lines": []}
-            sections.append(current)
-        for l in lines:
+        for l in _text(blk):
+            if is_head(l):
+                current = {"name": l.strip().rstrip(":"), "lines": []}
+                sections.append(current)
+                continue
+            if current is None:
+                current = {"name": "pallavi", "lines": []}
+                sections.append(current)
             if re.fullmatch(r"\(.{1,30}\)", l):        # "(kOTi)" = repeat the pallavi
                 current.setdefault("repeat_markers", []).append(l.strip("()"))
                 continue

@@ -139,3 +139,39 @@ def run_f0(b: Bundle, est: F0Estimator, saraga_pitch=None) -> dict:
     ir.setdefault("qc", {})["f0"] = report
     b.save(ir)
     return report
+
+
+def concert_consensus(tonics: List[Tuple[str, float, float]], tol_cents: float = 40.0
+                      ) -> Optional[float]:
+    """Sa pitch class shared by a concert: the duration-weighted pitch class
+    (as Hz in some octave) that most recordings agree with within
+    ``tol_cents``.  ``tonics`` = [(mbid, tonic_hz, duration_s)]."""
+    if not tonics:
+        return None
+    pcs = np.array([np.mod(1200 * np.log2(t / 440.0), 1200) for _, t, _ in tonics])
+    w = np.array([d for _, _, d in tonics])
+    dist = lambda a, b: np.abs((a - b + 600) % 1200 - 600)
+    support = [w[dist(pcs, p) <= tol_cents].sum() for p in pcs]
+    best = int(np.argmax(support))
+    members = dist(pcs, pcs[best]) <= tol_cents
+    ref = pcs[best]
+    mean_pc = ref + np.average(((pcs[members] - ref + 600) % 1200) - 600, weights=w[members])
+    return float(440.0 * 2 ** (mean_pc / 1200))
+
+
+def apply_tonic(b: Bundle, tonic: float, source: str) -> None:
+    """Set a bundle's tonic and recompute the cents curves it stores."""
+    ir = b.load()
+    for name in ("f0_100hz.npz", "f0_100hz_vocal-s.npz"):
+        path = b.path(name)
+        if not path.exists():
+            continue
+        z = dict(np.load(path))
+        f0 = z["f0_hz"]
+        cents = np.full(len(f0), np.nan, dtype=np.float32)
+        v = f0 > 0
+        cents[v] = 1200 * np.log2(f0[v] / tonic)
+        z["cents"] = cents
+        np.savez_compressed(path, **z)
+    ir["tonic_hz"], ir["tonic_source"] = round(float(tonic), 3), source
+    b.save(ir)

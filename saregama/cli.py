@@ -342,7 +342,8 @@ def cmd_viz(a):
         syl = []
         if b.path("lyrics.json").exists():
             lyr = json.loads(b.path("lyrics.json").read_text(encoding="utf-8"))
-            syl = [x for line in lyr.get("lines", []) for x in line.get("syllables", [])]
+            syl = [{"text": sy["text"], "start": sy["start"], "sargam": inst["section"] == "sargam"}
+                   for inst in lyr.get("instances", []) for w in inst["words"] for sy in w["syllables"]]
         out = contour_pdf(b.review_dir / "contour.pdf", ir["title"], ir["tonic_hz"], ir.get("raaga", ""),
                           b.path("f0_100hz.npz"), sw, ir.get("sections", []), ir.get("sama", []), syl,
                           max_pages=a.max_pages or None)
@@ -452,6 +453,9 @@ def cmd_align(a):
         import torchaudio
         vocab = dict(torchaudio.pipelines.MMS_FA.get_dict(star=None))
         inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
+        if b.path("f0_100hz.npz").exists():
+            from .stages.align_kriti import extend_sustain
+            extend_sustain(inst, np.load(b.path("f0_100hz.npz"))["f0_hz"] > 0)
         src = {"work_mbid": r.work_mbid, "selected": doc.get("selected"), "source": doc.get("source"),
                "verified": bool(doc.get("verified"))}
         b.path("lyrics.json").write_text(json.dumps(to_json(lines, inst, rep, src), ensure_ascii=False),
@@ -469,6 +473,49 @@ def cmd_align(a):
         b.save(ir)
         b.mark("align", **summ)
         print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summ)}", flush=True)
+
+
+def cmd_tonic_consensus(a):
+    """Enforce one Sa per concert: recordings whose tonic pitch class is off the
+    concert consensus get the consensus (octave placed per recording)."""
+    import numpy as np
+    from collections import defaultdict
+    from .ir import Bundle
+    from .stages.f0_ir import apply_tonic, concert_consensus
+    from .stages.tonic import snap_to_tonic_octave
+    by_concert = defaultdict(list)
+    for r in _saraga_recs(a):
+        b = Bundle(a.ann_root, r.mbid)
+        if b.stage_done("f0"):
+            by_concert[r.concert].append((r, b))
+    from .saraga import scan
+    saraga_votes = defaultdict(list)                       # every recording of the concert votes
+    for r in scan(a.saraga_root):
+        if r.tonic():
+            saraga_votes[r.concert].append((r.mbid, r.tonic(), r.length_s))
+    for concert, items in by_concert.items():
+        ours = {r.mbid: (r.mbid, b.load()["tonic_hz"], 2 * r.length_s) for r, b in items}
+        votes = list(ours.values()) + [v for v in saraga_votes[concert] if v[0] not in ours]
+        ref = concert_consensus(votes)
+        ref = ref / 2 ** np.floor(np.log2(ref / 100.0))     # print in 100-200 Hz
+        for r, b in items:
+            ir = b.load()
+            off = (1200 * np.log2(ir["tonic_hz"] / ref) + 600) % 1200 - 600
+            if abs(off) <= a.tol:
+                continue
+            f0 = np.load(b.path("f0_100hz.npz"))["f0_hz"]
+            new = snap_to_tonic_octave(ref, f0)
+            print(f"{concert[:30]} | {r.title}: {ir['tonic_hz']} -> {new:.3f} Hz (off {off:+.0f} c)", flush=True)
+            if a.dry_run:
+                continue
+            ir["flags"] = sorted(set(ir.get("flags", [])) | {"tonic_from_concert"})
+            ir["tonic_recording_hz"] = ir["tonic_hz"]
+            b.save(ir)
+            apply_tonic(b, new, "concert_consensus")
+            ir = b.load()
+            ir.get("stages", {}).pop("swaras", None)       # swaras depend on the tonic
+            b.save(ir)
+        print(f"{concert[:30]}: Sa pitch class {ref:.2f} Hz ({len(votes)} votes)", flush=True)
 
 
 def main(argv=None):
@@ -596,6 +643,12 @@ def main(argv=None):
     s.add_argument("--filler-logp", type=float, default=-3.0)
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_align, stems_only=True)
+
+    s = sub.add_parser("tonic-consensus", help="one Sa per concert; fix outlier recordings")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--tol", type=float, default=40.0, help="cents")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_tonic_consensus, stems_only=True)
 
     a = p.parse_args(argv)
     a.fn(a)

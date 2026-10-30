@@ -56,3 +56,17 @@ def test_loop_alignment_recovers_order():
         assert i.complete and not i.flags
     assert [w.text for w in inst[0].words] == ["sarigama", "padani"]
     assert [s.text for s in inst[0].words[0].syllables] == ["sa", "ri", "ga", "ma"]
+
+
+def test_long_hold_inside_a_line_is_resumed():
+    rng = np.random.default_rng(1)
+    lines = lyric_lines([{"name": "pallavi", "lines": ["sarigama padani", "ninnu kori"]}])
+    sung = [None, "sarigama", None, None, None, None, None, None, None, None, "padani", None, "ninnu kori"]
+    logp, _ = _emissions(sung, len(VOCAB) + 1, rng, filler_frames=30)
+    g = build_graph(lines, VOCAB, BLANK)
+    cfg = AlignCfgK(filler_logp=-2.5)
+    lp, sp, _ = loop_viterbi(logp, g, transition_penalties(lines, [0, 1], cfg), cfg, BLANK)
+    inst = instances_from_path(lp, sp, logp, g, cfg, BLANK)
+    assert [i.line_id for i in inst] == [0, 1]
+    assert inst[0].complete and "resumed" in inst[0].flags
+    assert [w.text for w in inst[0].words] == ["sarigama", "padani"]
