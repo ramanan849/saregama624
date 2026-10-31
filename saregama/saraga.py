@@ -66,6 +66,10 @@ class Recording:
                 return load_pitch(self.ann[key])
         return None
 
+    def pitch_refs(self) -> dict:
+        """Every Saraga pitch track: {"pitch-vocal": (t, f0), "pitch": (t, f0)}."""
+        return {k: load_pitch(self.ann[k]) for k in ("pitch-vocal", "pitch") if k in self.ann}
+
     def sections(self) -> List[dict]:
         for key in ("sections-manual-p", "sections-manual"):
             if key in self.ann:

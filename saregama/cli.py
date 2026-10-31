@@ -285,10 +285,22 @@ def cmd_f0(a):
     from .config import F0Cfg, SeparationCfg
     from .ir import F0_HZ, Bundle
     from .stages.f0 import F0Estimator
-    from .stages.f0_ir import run_f0
+    from .stages.f0_ir import run_f0, saraga_qc
+    recs = _saraga_recs(a)
+    if a.qc_only:
+        import numpy as np
+        for i, r in enumerate(recs, 1):
+            b = Bundle(a.ann_root, r.mbid)
+            if not b.stage_done("f0"):
+                continue
+            ir = b.load()
+            q = saraga_qc(np.load(b.path("f0_100hz.npz"))["f0_hz"], r.pitch_refs())
+            ir.setdefault("qc", {}).setdefault("f0", {}).setdefault("vocal_clean", {})["vs_saraga"] = q
+            b.save(ir)
+            print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(q)}", flush=True)
+        return
     cfg = F0Cfg(backends=a.backends.split(","), device=a.device)
     est = F0Estimator(cfg, SeparationCfg().soulx_repo, fps=F0_HZ)
-    recs = _saraga_recs(a)
     for i, r in enumerate(recs, 1):
         b = Bundle(a.ann_root, r.mbid)
         if not b.stage_done("stems"):
@@ -296,7 +308,7 @@ def cmd_f0(a):
             continue
         if b.stage_done("f0") and not a.force:
             continue
-        rep = run_f0(b, est, r.pitch())
+        rep = run_f0(b, est, r.pitch_refs())
         ir = b.mark("f0", backends=cfg.backends)
         print(f"[{i}/{len(recs)}] {r.title}: tonic {ir['tonic_hz']} ({ir['tonic_source']}, "
               f"histogram {ir.get('tonic_histogram_hz')}) {json.dumps(rep)}", flush=True)
@@ -433,6 +445,9 @@ def cmd_align(a):
             continue
         if b.stage_done("align") and not a.force:
             continue
+        if b.load().get("status") == "reviewed":
+            print(f"[{i}/{len(recs)}] {r.title}: reviewed, not re-aligned", flush=True)
+            continue
         lpath = Path(a.lyrics_dir) / f"{r.work_mbid}.yaml"
         doc = yaml.safe_load(lpath.read_text(encoding="utf-8")) if lpath.exists() else None
         if not doc or not doc.get("lyrics"):
@@ -478,6 +493,27 @@ def cmd_align(a):
         b.save(ir)
         b.mark("align", engine=a.engine, **summ)
         print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summ)}", flush=True)
+
+
+def cmd_review_export(a):
+    from .ir import Bundle
+    from .review_sv import export_review
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("f0"):
+            continue
+        out = export_review(b, preview=not a.no_preview)
+        print(f"[{i}/{len(recs)}] {r.title}: {b.review_dir} ({', '.join(sorted(out))})", flush=True)
+
+
+def cmd_review_import(a):
+    from .ir import Bundle
+    from .review_sv import import_review
+    for r in _saraga_recs(a):
+        b = Bundle(a.ann_root, r.mbid)
+        rep = import_review(b, a.reviewer, Path(a.dir) if a.dir else None)
+        print(f"{r.title}: {json.dumps(rep, ensure_ascii=False)}", flush=True)
 
 
 def cmd_tonic_consensus(a):
@@ -615,6 +651,7 @@ def main(argv=None):
     s = sub.add_parser("f0", help="100 Hz F0 ensemble on the cleaned vocal stem(s), tonic, cents")
     s.add_argument("--mbids", default="")
     s.add_argument("--backends", default="rmvpe,fcpe,crepe")
+    s.add_argument("--qc-only", action="store_true", help="only re-compare stored F0 with Saraga's tracks")
     s.add_argument("--device", default="cuda")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_f0, stems_only=True)
@@ -650,6 +687,17 @@ def main(argv=None):
                    help="spikes: DP over MMS letter spikes (default); trellis: frame-level CTC")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_align, stems_only=True)
+
+    s = sub.add_parser("review-export", help="Sonic Visualiser layers + sync_preview.flac in review/")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--no-preview", action="store_true", help="skip sync_preview.flac")
+    s.set_defaults(fn=cmd_review_export, stems_only=True)
+
+    s = sub.add_parser("review-import", help="read corrected layers from review/corrected/, mark reviewed")
+    s.add_argument("--mbids", required=True)
+    s.add_argument("--reviewer", default="")
+    s.add_argument("--dir", default="", help="folder with the corrected .svl files")
+    s.set_defaults(fn=cmd_review_import, stems_only=True)
 
     s = sub.add_parser("tonic-consensus", help="one Sa per concert; fix outlier recordings")
     s.add_argument("--mbids", default="")

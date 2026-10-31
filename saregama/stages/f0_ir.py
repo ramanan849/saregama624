@@ -102,7 +102,23 @@ def choose_tonic(f0: np.ndarray, saraga_tonic: Optional[float], raga: str = ""
     return snap_to_tonic_octave(best["tonic_hz"], f0), best["source"], cands
 
 
-def run_f0(b: Bundle, est: F0Estimator, saraga_pitch=None) -> dict:
+REF_LENGTH_TOL_S = 2.0
+
+
+def saraga_qc(f0: np.ndarray, refs: dict, fps: float = F0_HZ) -> dict:
+    """Compare ``f0`` with each Saraga pitch track.  A track whose length differs
+    from the recording's by more than REF_LENGTH_TOL_S belongs to another file
+    (it happens in Saraga) and is reported as such, not scored."""
+    out = {}
+    for name, (rt, rf) in refs.items():
+        if abs(float(rt[-1]) - len(f0) / fps) > REF_LENGTH_TOL_S:
+            out[name] = {"skipped": f"length {rt[-1]:.1f} s vs {len(f0) / fps:.1f} s"}
+        else:
+            out[name] = compare_with_saraga(f0, rt, rf, fps)
+    return out
+
+
+def run_f0(b: Bundle, est: F0Estimator, saraga_refs: Optional[dict] = None) -> dict:
     ir = b.load()
     report = {}
     for stem, suffix in (("vocal_clean", ""), ("vocal-s_clean", "_vocal-s")):
@@ -133,8 +149,8 @@ def run_f0(b: Bundle, est: F0Estimator, saraga_pitch=None) -> dict:
         rep = {"frames": n, "voiced": round(float(v.mean()), 4),
                "agree_voiced": round(float(out["f0_agree"][v].mean()) if v.any() else 0.0, 4),
                "octave_fixed_frames": int(out["octave_fixed_frames"])}
-        if saraga_pitch is not None:
-            rep["vs_saraga"] = compare_with_saraga(f0, *saraga_pitch)
+        if saraga_refs and stem == "vocal_clean":
+            rep["vs_saraga"] = saraga_qc(f0, saraga_refs)
         report[stem] = rep
     ir.setdefault("qc", {})["f0"] = report
     b.save(ir)
