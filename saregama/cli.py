@@ -22,6 +22,7 @@ redoes recordings already done):
     review-export     Sonic Visualiser layers + sync preview
     review-import     read corrected layers back, mark reviewed
     export-ir         ICM-IR v0 dataset: parquet tables + 100 Hz frames
+    export-soulx      SoulX-Singer training clips (melody mode)
 
 Global options ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` default to
 the locations in :mod:`saregama.paths`.
@@ -878,6 +879,93 @@ See the saregama624 README for the methods and their measured accuracy.
 """
 
 
+def cmd_export_soulx(a):
+    """``export-soulx``: SoulX-Singer training clips (``saregama/export_soulx.py``)
+    from every bundle with swaras, for each singer track; splits follow the
+    ICM-IR export's ``splits.json`` when it exists (same concerts in each split)."""
+    from collections import Counter, defaultdict
+    import numpy as np
+    import yaml
+    from .audio import load_audio, save_audio
+    from .export import DATA_PROCESSOR_PATCH
+    from .export_ir import assign_splits, singer_id, syllable_rows
+    from .export_soulx import (LANGUAGE_NAMES, ClipCfgS, akaram_spans, clip_item, clip_notes, plan_clips,
+                               track_notes)
+    from .ir import Bundle
+    from .paths import SOULX_REPO
+    from .phoneset import embedding_init_map, extend_soulx_phoneset
+    from .stages.swaras import segment
+    cfg = ClipCfgS(min_s=a.min_s, max_s=a.max_s)
+    out = Path(a.out)
+    (out / "wavs").mkdir(parents=True, exist_ok=True)
+    recs = [r for r in _saraga_recs(a) if Bundle(a.ann_root, r.mbid).stage_done("swaras")]
+    splits_path = Path(a.splits)
+    split = (json.loads(splits_path.read_text(encoding="utf-8")) if splits_path.exists()
+             else assign_splits(sorted({r.concert for r in recs})))
+    items, stats = defaultdict(list), Counter()
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        ir = b.load()
+        sections = ir.get("sections") or ir.get("sections_auto") or []
+        lpath = Path(a.lyrics_dir) / f"{r.work_mbid}.yaml"
+        ldoc = yaml.safe_load(lpath.read_text(encoding="utf-8")) if lpath.exists() else {}
+        langs = (ldoc.get("musicbrainz") or {}).get("languages") or []
+        leads = ir.get("lead", [])
+        n_clips = 0
+        for stem, suffix, singer in VOICES:
+            if stem not in ir["stems"] or not b.path(f"f0_100hz{suffix}.npz").exists():
+                continue
+            z = np.load(b.path(f"f0_100hz{suffix}.npz"))
+            f0, cents = z["f0_hz"].astype(np.float64), z["cents"].astype(np.float64)
+            rows = []
+            if b.path(f"lyrics{suffix}.json").exists():
+                lyr = json.loads(b.path(f"lyrics{suffix}.json").read_text(encoding="utf-8"))
+                rows = [x for x in syllable_rows(r.mbid, lyr, singer, {}, sections, bool(ldoc.get("verified")))
+                        if (a.keep_low_conf or not x["low_conf"]) and x["overlap"] <= cfg.max_overlap]
+            if suffix:                                 # the second singer's own swara segments
+                segs = [dict(start=s.start, end=s.end, kind=s.kind, swara=s.swara)
+                        for s in segment(cents, ir.get("raaga", ""))[0]]
+            else:
+                segs = json.loads(b.path("swaras.json").read_text(encoding="utf-8"))["segments"]
+            extra = akaram_spans(f0 > 0, sections, rows, cfg.akaram_min_s) if a.akaram else []
+            n50 = len(f0) // 2
+            notes = track_notes(rows, extra, segs, f0, cents, n50)
+            spans = plan_clips(notes, f0[::2][:n50] > 0, cfg)
+            if not spans:
+                continue
+            audio = load_audio(b.dir / ir["stems"][stem]["path"], 24000)
+            name = leads[1 if suffix and len(leads) > 1 else 0] if leads else singer
+            for k, (x, y) in enumerate(spans):
+                cid = f"{r.mbid[:8]}{suffix}_{k:04d}"
+                cn = clip_notes(notes, x, y)
+                if not any(n.kind != 1 for n in cn):
+                    continue
+                save_audio(out / "wavs" / f"{cid}.wav", audio[x * 480:y * 480])
+                sp = split.get(r.concert, "train")
+                items[sp].append(clip_item(cn, x, y, f0, {
+                    "clip_id": cid, "language": LANGUAGE_NAMES.get(langs[0], langs[0]) if langs else "Carnatic",
+                    "tonic_hz": ir["tonic_hz"], "singer_id": singer_id(name), "mbid": r.mbid, "split": sp,
+                    "lyrics_verified": bool(ldoc.get("verified")), "wav": f"wavs/{cid}.wav"}))
+                stats[f"{sp}_s"] += (y - x) / 50
+                stats["akaram_clips" if not rows else "lyric_clips"] += 1
+                n_clips += 1
+        print(f"[{i}/{len(recs)}] {r.title}: {n_clips} clips", flush=True)
+    for sp, lst in items.items():
+        (out / f"{sp}.json").write_text(json.dumps(lst, ensure_ascii=False), encoding="utf-8")
+        with open(out / f"{sp}.jsonl", "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(x, ensure_ascii=False) + "\n" for x in lst)
+    sx = out / "soulx"
+    sx.mkdir(exist_ok=True)
+    extend_soulx_phoneset(SOULX_REPO / "soulxsinger" / "utils" / "phoneme" / "phone_set.json",
+                          sx / "phone_set_indic.json")
+    (sx / "embedding_init_map.json").write_text(json.dumps(embedding_init_map(), indent=1), encoding="utf-8")
+    (sx / "data_processor.patch").write_text(DATA_PROCESSOR_PATCH, encoding="utf-8")
+    summary = {**{k: round(v / 3600, 3) if k.endswith("_s") else v for k, v in stats.items()},
+               "clips": {k: len(v) for k, v in items.items()}}
+    (out / "stats.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    print(json.dumps(summary), flush=True)
+
+
 def cmd_review_export(a):
     """``review-export``: Sonic Visualiser layers, sync preview and README into
     each bundle's ``review/``.
@@ -1102,6 +1190,17 @@ def main(argv=None):
     s.add_argument("--test-concerts", default="", help="';'-separated concert names forced into test")
     s.add_argument("--val-concerts", default="", help="';'-separated concert names forced into val")
     s.set_defaults(fn=cmd_export_ir, stems_only=True)
+
+    s = sub.add_parser("export-soulx", help="SoulX-Singer training clips (melody mode) from the bundles")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "export" / "soulx_v0"))
+    s.add_argument("--splits", default=str(ANN_ROOT.parent / "export" / "icm_ir_v0" / "splits.json"),
+                   help="concert -> split map to follow (the ICM-IR export's)")
+    s.add_argument("--min-s", type=float, default=2.0)
+    s.add_argument("--max-s", type=float, default=16.0)
+    s.add_argument("--no-akaram", dest="akaram", action="store_false", help="skip alapana akaram clips")
+    s.add_argument("--keep-low-conf", action="store_true", help="keep low-confidence lyric instances")
+    s.set_defaults(fn=cmd_export_soulx, stems_only=True)
 
     s = sub.add_parser("align", help="line-loop CTC alignment of the (selected) lyrics")
     s.add_argument("--mbids", default="")

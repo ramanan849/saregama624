@@ -40,7 +40,7 @@ Steps 1–7 run end to end on a 10-recording pilot
 | 5 Lyrics | `lyrics-fetch`, `lyrics-verify` | 72 / 133 compositions matched automatically, none verified by a person yet |
 | 6 Alignment | `align` | 7 pilot songs aligned; sync validated to within ~50 ms |
 | 7 Review | `review-export`, `review-import` | Sonic Visualiser layers + sync preview; lossless round trip |
-| 8 Export | `export-ir` (SoulX clips: next) | ICM-IR v0 dataset; runs on the pilot |
+| 8 Export | `export-ir`, `export-soulx` | ICM-IR v0 dataset; SoulX clips (pilot: 243 clips, 0.65 h, all pass SoulX's frame/phone checks) |
 
 The 168 multitrack recordings have not been run yet; only the pilot has.
 
@@ -127,6 +127,7 @@ $S viz             --mbids $P                 #    review/contour.pdf
 $S review-export   --mbids $P                 # 7  Sonic Visualiser layers + sync preview
 $S review-import   --mbids <id> --reviewer <name>
 $S export-ir                                  # 8  ICM-IR v0 dataset -> annotations/export/icm_ir_v0
+$S export-soulx                               #    SoulX clips (same splits) -> annotations/export/soulx_v0
 ```
 
 `scripts/run_stages.sh <mbids-file> <gpu> [stage ...]` runs stages in order over a
@@ -341,6 +342,38 @@ bundles into `annotations/export/icm_ir_v0/`. The bundles stay the editable reco
 - **Phone timing.** `phone_id` places the consonants at a syllable's edges and lets the
   vowel fill the rest. Only the syllable span is aligned, not each phone.
 - **Matra.** The matra fields are filled only inside kriti / svara / tani sections.
+
+### 8. `export-soulx` — `saregama/export_soulx.py`
+
+This writes SoulX-Singer training clips in melody mode (lyrics + F0). SoulX ships no
+training code, so the data follows the metadata format its preprocessing writes and its
+`DataProcessor` reads: 24 kHz audio, 50 fps, with `duration` / `text` / `phoneme` /
+`note_pitch` / `note_type` / `f0` per clip. Extras: tonic, per-note cents and swara,
+singer id, recording, split, lyric status.
+
+**Notes**
+- Each syllable is split into notes at swara-segment boundaries. The first note
+  (type 2) carries the phones; the rest are type-3 slurs carrying only the vowel,
+  because SoulX cycles a note's phones over its frames.
+- A note needs phones + 3 frames (`<BOW>`, phones, `<SEP>`, `<EOW>`); shorter notes
+  merge into a neighbour.
+- In alapana sections, voiced stretches with no syllables become akaram notes (`in_a`).
+
+**Clips**
+- Clips are 2–16 s, cut in rests of at least 0.3 s, and padded only into silence.
+- Voiced audio that nothing labels ends a phrase, so it never sits inside a clip
+  labelled as a rest.
+- Instances flagged `low_conf`, and duet stretches with more than 30 % overlap, are
+  left out.
+- Splits follow the ICM-IR export's `splits.json`.
+
+**Output:** `wavs/`, `{train,val,test}.json(l)`, `stats.json`, and `soulx/`: the phone set
+extended with the `in_` tokens (indices after SoulX's 2,820), the embedding
+initialisation map, and the one-branch `data_processor.patch`.
+
+**Pilot yield** (share of voiced time that ends up in clips): alapana 99 %, kalpana
+svara 39 %, kriti 21 %. The kriti figure is limited by lyric alignment coverage
+(42–70 % of voiced kriti time).
 
 ### 7. `review-export`, `review-import` — `saregama/review_sv.py`
 
@@ -569,6 +602,7 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/stages/align_kriti.py` | text, line graph, section rules, MMS emitter, trellis engine |
 | `saregama/review_sv.py` | Sonic Visualiser export / import, sync preview |
 | `saregama/export_ir.py` | ICM-IR v0 dataset export |
+| `saregama/export_soulx.py` | SoulX-Singer clip export (notes, akaram, clip planning) |
 | `saregama/cli.py` | all commands |
 
 **Legacy** (ported from `indic-svs-annotator`, for film songs: songs.csv workspaces,
@@ -610,6 +644,7 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_lyrics_parse.py`, `test_lyrics_status.py` | karnatik.com parsing; status table |
 | `test_translit.py` | ISO-15919 spelling, phones, syllable fitting, notation lines |
 | `test_export_ir.py` | swara naming, svarasthana, splits, quantisation, phone track |
+| `test_export_soulx.py` | notes per syllable, short-note merging, clip planning, item format |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |
@@ -629,7 +664,8 @@ No test needs a GPU or a model download.
 - **Tonic.** Recordings flagged `tonic_ambiguous` need a listen.
 
 **Next steps**
-1. Step 8: SoulX-Singer clips (2–16 s, 50 fps F0, `in_` phones) and the Probe-40 set.
+1. The Probe-40 Carnatic set, and an SVC rendering check: does SoulX's F0 conditioning
+   keep gamakas?
 2. Run all 168 multitrack recordings.
 3. About 5 hand-corrected gold recordings, plus a Carnatic-Varnam onset evaluation.
 4. Phase 2: the 81 recordings without stems (mix separation), then Hindustani.
