@@ -16,6 +16,8 @@ redoes recordings already done):
     lyrics-fetch      candidate lyrics per composition (web)
     lyrics-status     rebuild lyrics/status.tsv from the YAMLs (offline)
     lyrics-verify     show candidates / record the right lyrics
+    lyrics-review-pack  works + audio excerpts for the shared review page
+    lyrics-apply      apply decisions exported from the review page
     emissions         cache MMS_FA emissions per vocal stem             (GPU)
     align             time-aligned lyrics (MMS_FA spikes; uses the cache)
     viz               contour sheets (PDF)
@@ -430,10 +432,11 @@ def cmd_lyrics_fetch(a):
     """``lyrics-fetch``: candidate lyrics per composition (MusicBrainz +
     karnatik.com) into ``<lyrics-dir>/<work>.yaml`` and ``status.tsv``.
     """
-    from .lyrics_fetch import Fetcher, fetch_work, karnatik_index, work_status, write_status
+    from .lyrics_fetch import Fetcher, fetch_work, karnatik_index, shivkumar_index, work_status, write_status
     out_dir = Path(a.lyrics_dir)
     f = Fetcher(out_dir / "_cache")
     index = karnatik_index(f)
+    second = shivkumar_index(f) if a.second_source else None
     works = {}
     for r in _saraga_recs(a):
         if r.work_mbid and r.work_mbid not in works:
@@ -441,7 +444,7 @@ def cmd_lyrics_fetch(a):
     errors = 0
     for i, (wm, r) in enumerate(works.items(), 1):
         try:
-            doc = fetch_work(f, index, wm, r.work_title or r.title, r.raaga, out_dir)
+            doc = fetch_work(f, index, wm, r.work_title or r.title, r.raaga, out_dir, second_index=second)
         except Exception as e:
             errors += 1
             print(f"[{i}/{len(works)}] error    {r.work_title or r.title}: {e!r}", flush=True)
@@ -472,25 +475,12 @@ def cmd_lyrics_verify(a):
                 print(f"   {sec['name']}: " + " | ".join(sec["lines"]))
         print(f"\nselected: {doc.get('selected')}  verified: {doc.get('verified')}")
         return
+    from .lyrics_fetch import apply_decision
     if a.text:
-        sections, cur = [], None
-        for line in Path(a.text).read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.endswith(":"):
-                cur = {"name": line[:-1], "lines": []}
-                sections.append(cur)
-            else:
-                if cur is None:
-                    cur = {"name": "pallavi", "lines": []}
-                    sections.append(cur)
-                cur["lines"].append(line)
-        doc.update(selected=a.source or str(a.text), source="manual", lyrics=sections)
+        apply_decision(doc, "text", a.reviewer, text=Path(a.text).read_text(encoding="utf-8"),
+                       source=a.source or str(a.text), notes=a.notes)
     else:
-        c = doc["candidates"][a.pick]
-        doc.update(selected=c["url"], source="karnatik", lyrics=c["parsed"]["sections"])
-    doc.update(verified=True, verified_by=a.reviewer, notes=a.notes or doc.get("notes", ""))
+        apply_decision(doc, "candidate", a.reviewer, candidate_url=doc["candidates"][a.pick]["url"], notes=a.notes)
     path.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
     from .lyrics_fetch import write_status
     write_status(path.parent)                         # keep status.tsv in step with the YAMLs
@@ -539,6 +529,96 @@ def cmd_emissions(a):
             done.append(stem)
         if done:
             print(f"[{i}/{len(recs)}] {r.title}: {', '.join(done)}", flush=True)
+
+
+def cmd_lyrics_review_pack(a):
+    """``lyrics-review-pack``: what the lyrics review page shows.  Writes
+    ``<out>/works.json`` (per composition: status, candidates with their parsed
+    sections, the recordings that use it, the excerpt file) and
+    ``<out>/excerpts/<work_mbid>.mp3``: 20 s of a recording's mix, starting at
+    its first aligned lyric line, else at its pallavi, else a quarter in."""
+    import numpy as np
+    import soundfile as sf
+    import yaml
+    from .audio import load_audio
+    from .ir import Bundle
+    from .lyrics_fetch import work_status
+    out = Path(a.out)
+    (out / "excerpts").mkdir(parents=True, exist_ok=True)
+    recs_by_work = {}
+    for r in _saraga_recs(a):
+        if r.work_mbid:
+            recs_by_work.setdefault(r.work_mbid, []).append(r)
+    works = []
+    for i, path in enumerate(sorted(Path(a.lyrics_dir).glob("*.yaml")), 1):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        wm = doc["work_mbid"]
+        recs = recs_by_work.get(wm, [])
+        cands = [{"site": c.get("site", "karnatik"), "url": c["url"], "title": c.get("title", ""),
+                  "raga": c.get("raga", ""), "composer": c.get("composer", ""), "score": c.get("score"),
+                  "sections": (c.get("parsed") or {}).get("sections", [])}
+                 for c in doc.get("candidates", [])[:4] if (c.get("parsed") or {}).get("sections")]
+        excerpt, start = None, None
+        for r in recs:                              # prefer a recording with an aligned lyric line
+            b = Bundle(a.ann_root, r.mbid)
+            if b.path("lyrics.json").exists():
+                inst = [x for x in json.loads(b.path("lyrics.json").read_text(encoding="utf-8"))["instances"]
+                        if x["section"] != "sargam"]
+                if inst:
+                    excerpt, start = r, max(0.0, min(x["start"] for x in inst) - 1.0)
+                    break
+        if excerpt is None and recs:
+            r = recs[0]
+            pal = [s_ for s_ in r.sections() if s_["label"].lower().startswith("pallavi")]
+            excerpt, start = r, (pal[0]["start"] if pal else r.length_s / 4)
+        clip = None
+        if excerpt is not None:
+            sr = 22050
+            x = load_audio(excerpt.mix, sr)
+            seg = x[int(start * sr):int((start + a.seconds) * sr)]
+            if len(seg):
+                clip = f"{wm}.mp3"
+                fade = np.minimum(1.0, np.minimum(np.arange(len(seg)), np.arange(len(seg))[::-1]) / (0.5 * sr))
+                sf.write(str(out / "excerpts" / clip), (0.9 * seg * fade / (np.abs(seg).max() + 1e-9)).astype(np.float32),
+                         sr, format="MP3", subtype="MPEG_LAYER_III")
+        mb = doc.get("musicbrainz") or {}
+        works.append({"work_mbid": wm, "title": doc.get("title", ""), "raga": doc.get("raga", ""),
+                      "composer": "; ".join(mb.get("composer") or []), "languages": mb.get("languages") or [],
+                      "status": work_status(doc), "selected": doc.get("selected"), "site": doc.get("site"),
+                      "candidates": cands, "excerpt": clip,
+                      "excerpt_from": {"title": excerpt.title, "start_s": round(start, 1)} if clip else None,
+                      "recordings": [{"mbid": r.mbid, "title": r.title, "concert": r.concert,
+                                      "minutes": round(r.length_s / 60, 1)} for r in recs]})
+        print(f"[{i}] {doc.get('title')}: {len(cands)} candidates, excerpt {'yes' if clip else 'no'}", flush=True)
+    (out / "works.json").write_text(json.dumps(works, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"{len(works)} works -> {out}", flush=True)
+
+
+def cmd_lyrics_apply(a):
+    """``lyrics-apply``: apply review decisions exported from the lyrics review
+    page (a JSON list of ``{work_mbid, decision, candidate_url, text, source,
+    notes, reviewer}``) to the work YAMLs, then rebuild ``status.tsv``.
+    Re-run ``align --force`` for the recordings of the changed works."""
+    import yaml
+    from .lyrics_fetch import apply_decision, write_status
+    rows = json.loads(Path(a.reviews).read_text(encoding="utf-8"))
+    changed = []
+    for row in rows:
+        path = Path(a.lyrics_dir) / f"{row['work_mbid']}.yaml"
+        if not path.exists():
+            print(f"skip {row['work_mbid']}: no lyrics YAML", flush=True)
+            continue
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        try:
+            apply_decision(doc, row["decision"], row.get("reviewer", ""), row.get("candidate_url", ""),
+                           row.get("text", ""), row.get("source", ""), row.get("notes", ""))
+        except ValueError as e:
+            print(f"skip {doc.get('title')}: {e}", flush=True)
+            continue
+        path.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
+        changed.append(row["work_mbid"])
+        print(f"{doc.get('title')}: {row['decision']}", flush=True)
+    print(json.dumps({**write_status(Path(a.lyrics_dir)), "applied": len(changed)}), flush=True)
 
 
 def cmd_align(a):
@@ -1157,10 +1237,21 @@ def main(argv=None):
 
     s = sub.add_parser("lyrics-fetch", help="candidate lyrics per Saraga work (MusicBrainz + karnatik.com)")
     s.add_argument("--mbids", default="")
+    s.add_argument("--no-second-source", dest="second_source", action="store_false",
+                   help="do not search shivkumar.org for works karnatik.com cannot match")
     s.set_defaults(fn=cmd_lyrics_fetch, stems_only=True)
 
     s = sub.add_parser("lyrics-status", help="rebuild <lyrics-dir>/status.tsv from every work YAML (offline)")
     s.set_defaults(fn=cmd_lyrics_status)
+
+    s = sub.add_parser("lyrics-review-pack", help="works.json + audio excerpts for the lyrics review page")
+    s.add_argument("--out", default=str(LYRICS_DIR / "review_pack"))
+    s.add_argument("--seconds", type=float, default=20.0)
+    s.set_defaults(fn=cmd_lyrics_review_pack, stems_only=True, mbids="")
+
+    s = sub.add_parser("lyrics-apply", help="apply decisions exported from the lyrics review page")
+    s.add_argument("--reviews", required=True, help="JSON list of review decisions")
+    s.set_defaults(fn=cmd_lyrics_apply)
 
     s = sub.add_parser("lyrics-verify", help="show a work's lyric candidates, or record the right one")
     s.add_argument("--work", required=True, help="work mbid")

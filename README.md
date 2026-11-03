@@ -503,6 +503,10 @@ and stored in `annotations/lyrics/`.
    (karnatik.com wraps long lines), and stray language names are dropped.
 4. A candidate with a match score ≥ 0.9 and raga similarity ≥ 0.85 is pre-selected
    (`source: auto`).
+5. Compositions still unmatched are searched in shivkumar.org's krithi archive (about 340
+   songs; 10 s between requests, as its robots.txt asks). Its plain-English spellings are
+   lower-cased. Of the 61 missing compositions this gave candidates for 14 and an auto
+   match for 1, so 73 are now auto-matched and 60 missing.
 
 **Files written.**
 - `<work_mbid>.yaml`: MusicBrainz info, every candidate with its scores and parsed
@@ -531,6 +535,13 @@ $S lyrics-verify --work <work_mbid>                       # show the candidates 
 $S lyrics-verify --work <work_mbid> --pick 0 --reviewer <name>
 $S lyrics-verify --work <work_mbid> --text lyrics.txt --source <url> --reviewer <name>
 ```
+
+**Shared review page.** `lyrics-review-pack` writes `review_pack/works.json` (candidates,
+recordings, status per composition) and a 20 s MP3 excerpt per composition. These feed a
+shared web page where teammates confirm a candidate, paste corrected lyrics, or mark a
+pick as wrong or the lyrics as still missing. The page's decisions, exported as JSON,
+are applied with `lyrics-apply --reviews decisions.json`, which shares its logic with
+`lyrics-verify`.
 
 For `--text`, write a section name ending in `:` (for example `pallavi:`) on its own
 line, followed by that section's lines; `#` starts a comment. After verifying, re-run

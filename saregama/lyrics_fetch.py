@@ -18,8 +18,14 @@ command writes ``status.tsv`` (auto / missing / verified per work); missing
 works need lyrics from another source via ``lyrics-verify --text``.  The
 lyrics are for internal annotation only and are not redistributed.
 
+Works karnatik.com cannot match are then searched on shivkumar.org's krithi
+archive (``shivkumar_index`` / ``parse_shivkumar``) with the same scoring and
+auto-selection; that site spells in plain English-style capitals, so its
+lines are lower-cased.
+
 Requests carry a generic User-Agent naming this repository (no personal
-contact details) and are rate-limited per host.
+contact details) and are rate-limited per host (shivkumar.org: 10 s, as its
+robots.txt asks).
 """
 from __future__ import annotations
 
@@ -35,6 +41,8 @@ from typing import Dict, List, Optional
 import yaml
 
 USER_AGENT = "saregama624/0.1 (+https://github.com/ramanan849/saregama624)"
+SHIVKUMAR = "https://www.shivkumar.org/music/"
+HOST_INTERVAL = {"www.shivkumar.org": 10.0}           # its robots.txt: crawl-delay 10
 KARNATIK = "https://www.karnatik.com/"
 MUSICBRAINZ = "https://musicbrainz.org/ws/2/"
 LANGUAGES = {"telugu", "tamil", "kannada", "sanskrit", "malayalam", "hindi", "marathi", "manipravalam"}
@@ -57,6 +65,7 @@ class Fetcher:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.min_interval = min_interval_s
         self.last: Dict[str, float] = {}
+        self.host_interval = dict(HOST_INTERVAL)      # robots.txt crawl delays
 
     def get(self, url: str, encoding: Optional[str] = None) -> str:
         """Body of ``url``, from the cache if present.
@@ -70,7 +79,8 @@ class Fetcher:
         if path.exists():
             return path.read_text(encoding="utf-8")
         host = url.split("/")[2]
-        wait = self.min_interval - (time.time() - self.last.get(host, 0.0))
+        interval = max(self.min_interval, self.host_interval.get(host, 0.0))
+        wait = interval - (time.time() - self.last.get(host, 0.0))
         if wait > 0:
             time.sleep(wait)
         for attempt in range(5):
@@ -236,6 +246,68 @@ def parse_karnatik(page: str) -> dict:
     return out
 
 
+# ----------------------------------------------------------------------------- shivkumar.org
+
+def shivkumar_index(f: Fetcher) -> List[dict]:
+    """shivkumar.org's krithi archive as [{url, title, raga, composer, site}],
+    parsed from the index rows ``<li><b> Title: <a>Raga</a>; Tala; Composer ...``
+    and their notation-page link."""
+    page = f.get(SHIVKUMAR + "index.html", encoding="latin-1")
+    out = []
+    row = re.compile(r"(?is)<li>\s*<b>\s*([^:<]+?)\s*:\s*<a[^>]*>\s*([^<]+?)\s*</a>\s*;([^<]*?)</b>(.*?)(?=<li>|$)")
+    for title, raga, rest, tail in row.findall(page):
+        link = re.search(r'href="\./([^"]+\.htm)"', tail)
+        if not link:
+            continue
+        parts = [x.strip() for x in rest.split(";")]
+        out.append({"url": SHIVKUMAR + link.group(1), "title": html.unescape(title).strip(),
+                    "raga": html.unescape(raga).strip(), "composer": parts[1] if len(parts) > 1 else "",
+                    "site": "shivkumar"})
+    return out
+
+
+SHIVKUMAR_HEAD = re.compile(r"(?i)^(pallavi|anupallavi|charanam|caranam|madhyama\s*kala(?:m)?|chittaswaram|"
+                            r"samashti\s*charanam)\s*(\d*)\s*:?\s*(.*)$")
+
+
+def parse_shivkumar(page: str) -> dict:
+    """Lyric sections of a shivkumar.org notation page: the block from the first
+    section header ("Pallavi :") up to "Meaning" or the first notation line.
+    The site spells in plain English-style capitals (``Adamodi Galade``), which
+    carry no length / retroflex information, so the lines are lower-cased."""
+    text = re.sub(r"(?i)<br\s*/?>|</p>|<p[^>]*>|</tr>|</div>", "\n", page)
+    text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", text))
+    lines = [l for l in (re.sub(r"\s+", " ", x).strip() for x in text.splitlines()) if l]
+    out = {"raga": "", "tala": "", "composer": "", "language": "", "sections": []}
+    for l in lines[:80]:
+        m = re.match(r"(?i)(ragam|talam|composer)\s*:\s*(.+)", l)
+        if m:
+            out[{"ragam": "raga", "talam": "tala", "composer": "composer"}[m.group(1).lower()]] = m.group(2).strip()
+    sections, current, started = [], None, False
+    for l in lines:
+        if started and (l.lower().startswith("meaning") or re.search(r"[;|]", l)):
+            break                                     # the meaning / notation part follows the lyrics
+        m = SHIVKUMAR_HEAD.match(l)
+        if m:
+            started = True
+            name = m.group(1).lower()
+            name = "caraNam" if name in ("charanam", "caranam") else name
+            current = {"name": (name + " " + m.group(2)).strip(), "lines": []}
+            sections.append(current)
+            if m.group(3):
+                current["lines"].append(m.group(3).lower())
+            continue
+        if not started:
+            continue
+        l = l.lower()
+        if len(l.split()) == 1 and current["lines"]:  # wrapped tail of the previous line
+            current["lines"][-1] += " " + l
+        else:
+            current["lines"].append(l)
+    out["sections"] = [x for x in sections if x["lines"]]
+    return out
+
+
 # ----------------------------------------------------------------------------- MusicBrainz
 
 def musicbrainz_work(f: Fetcher, mbid: str) -> dict:
@@ -253,12 +325,14 @@ def musicbrainz_work(f: Fetcher, mbid: str) -> dict:
 # ----------------------------------------------------------------------------- driver
 
 def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: str,
-               out_dir: Path, n_pages: int = 3) -> dict:
+               out_dir: Path, n_pages: int = 3, second_index: Optional[List[dict]] = None) -> dict:
     """Build or refresh ``<out_dir>/<work_mbid>.yaml`` for one composition.
 
     Verified files are returned untouched.  Otherwise: MusicBrainz metadata, a
     karnatik.com search under every known title alias, the top ``n_pages``
-    candidate pages parsed, and ``auto_select`` applied.
+    candidate pages parsed, and ``auto_select`` applied.  When nothing is
+    auto-selected and ``second_index`` (shivkumar.org) is given, its two best
+    candidates scoring at least 0.75 are added and selection is tried again.
     """
     out = out_dir / f"{work_mbid}.yaml"
     if out.exists():
@@ -275,6 +349,7 @@ def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: 
                 cands[c["url"]] = c
     ranked = sorted(cands.values(), key=lambda c: -c["score"])
     for c in ranked[:n_pages]:
+        c.setdefault("site", "karnatik")
         try:
             c["parsed"] = parse_karnatik(f.get(c["url"], encoding="latin-1"))
         except Exception as e:                       # keep the candidate, note the failure
@@ -282,6 +357,22 @@ def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: 
     doc = auto_select({"work_mbid": work_mbid, "title": title, "raga": raga, "musicbrainz": mb,
                        "candidates": ranked, "selected": None, "verified": False,
                        "source": None, "lyrics": None, "notes": ""})
+    if not doc.get("selected") and second_index:
+        extra: Dict[str, dict] = {}
+        for name in names:
+            for c in match(second_index, name, raga or mb.get("raga", ""), composer, k=2):
+                if c["url"] not in extra or c["score"] > extra[c["url"]]["score"]:
+                    extra[c["url"]] = c
+        for c in sorted(extra.values(), key=lambda c: -c["score"])[:2]:
+            if c["score"] < 0.75:                    # do not spend 10 s requests on poor matches
+                continue
+            try:
+                c["parsed"] = parse_shivkumar(f.get(c["url"], encoding="latin-1"))
+            except Exception as e:
+                c["error"] = repr(e)
+            doc["candidates"].append(c)
+        doc["candidates"].sort(key=lambda c: -c["score"])
+        doc = auto_select(doc)
     out_dir.mkdir(parents=True, exist_ok=True)
     out.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
     return doc
@@ -289,6 +380,61 @@ def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: 
 
 AUTO_SCORE = 0.9             # combined match score needed for auto-selection ...
 AUTO_RAGA = 0.85             # ... and raga similarity (same title, other raga = other song)
+
+
+def parse_lyrics_text(text: str) -> List[dict]:
+    """Sections from typed or pasted lyrics: a line ending in ``:`` starts a
+    section ("pallavi:"), other lines are its lines, ``#`` starts a comment;
+    lines before any header belong to the pallavi."""
+    sections, cur = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith(":"):
+            cur = {"name": line[:-1].strip(), "lines": []}
+            sections.append(cur)
+            continue
+        if cur is None:
+            cur = {"name": "pallavi", "lines": []}
+            sections.append(cur)
+        cur["lines"].append(line)
+    return [s for s in sections if s["lines"]]
+
+
+DECISIONS = ("candidate", "text", "wrong", "missing")
+
+
+def apply_decision(doc: dict, decision: str, reviewer: str = "", candidate_url: str = "", text: str = "",
+                   source: str = "", notes: str = "") -> dict:
+    """Record a person's decision on a work's lyrics (in place; returns ``doc``).
+
+    * ``candidate``: the candidate at ``candidate_url`` is right -> verified
+    * ``text``: lyrics typed or pasted (``parse_lyrics_text``), from ``source`` -> verified
+    * ``wrong``: the auto-selected candidate is not this song -> unselected, unverified
+    * ``missing``: no candidate is right and no text yet -> stays unverified, noted
+    """
+    if decision not in DECISIONS:
+        raise ValueError(f"unknown decision {decision!r}; expected one of {DECISIONS}")
+    if decision == "candidate":
+        c = next((c for c in doc.get("candidates", []) if c["url"] == candidate_url), None)
+        if c is None or not (c.get("parsed") or {}).get("sections"):
+            raise ValueError(f"{doc.get('title')}: no parsed candidate {candidate_url!r}")
+        doc.update(selected=c["url"], source=c.get("site", "karnatik"), lyrics=c["parsed"]["sections"],
+                   verified=True)
+    elif decision == "text":
+        sections = parse_lyrics_text(text)
+        if not sections:
+            raise ValueError(f"{doc.get('title')}: the pasted lyrics have no lines")
+        doc.update(selected=source or "manual", source="manual", lyrics=sections, verified=True)
+    elif decision == "wrong":
+        doc.update(selected=None, source=None, lyrics=None, verified=False)
+    doc["review"] = {"decision": decision, "reviewer": reviewer, "notes": notes}
+    if decision in ("candidate", "text"):
+        doc["verified_by"] = reviewer
+    if notes:
+        doc["notes"] = notes
+    return doc
 
 
 STATUS_HEADER = ["work_mbid", "title", "raga", "composer", "language", "status", "source",
@@ -333,6 +479,7 @@ def auto_select(doc: dict) -> dict:
         if c["score"] >= AUTO_SCORE and c["raga_sim"] >= AUTO_RAGA and c.get("parsed", {}).get("sections"):
             doc["selected"] = c["url"]
             doc["source"] = "auto"
+            doc["site"] = c.get("site", "karnatik")
             doc["lyrics"] = c["parsed"]["sections"]
             return doc
     return doc

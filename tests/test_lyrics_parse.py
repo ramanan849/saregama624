@@ -27,3 +27,21 @@ def test_parse_sections_markers_and_wrapped_tail():
     assert out["sections"][0]["repeat_markers"] == ["dinamaNi"]
     car = out["sections"][2]["lines"]
     assert len(car) == 2 and car[1].endswith("tyAgarAja sarvasvamau")
+
+
+SHIV = """<p>Ragam : Charukesi<br>Talam : Adi<br>Composer: Tyagaraja<br>
+Pallavi :<br>Adamodi Galade Ramayya Maata<br>
+Anupallavi :<br>Thodunida Nive Yanuchu Bhaktito<br>Gudina Nee Paadamu Battina<br>Naato Maata<br>
+Charanam :<br>Chaduvulanni Delisi Shankaraantshu<br>Dai<br>
+Meaning:<br>O Ramayya ! ...<br>P ; D- P ; M G R | G- gr S ||<br>"""
+
+
+def test_parse_shivkumar():
+    """Header fields, sections up to 'Meaning', lower-cased lines, wrapped tails joined."""
+    from saregama.lyrics_fetch import parse_shivkumar
+    out = parse_shivkumar(SHIV)
+    assert out["raga"] == "Charukesi" and out["tala"] == "Adi" and out["composer"] == "Tyagaraja"
+    assert [s["name"] for s in out["sections"]] == ["pallavi", "anupallavi", "caraNam"]
+    assert out["sections"][0]["lines"] == ["adamodi galade ramayya maata"]
+    assert out["sections"][1]["lines"][-2:] == ["gudina nee paadamu battina", "naato maata"]  # 2-word tail stays
+    assert out["sections"][2]["lines"] == ["chaduvulanni delisi shankaraantshu dai"]
