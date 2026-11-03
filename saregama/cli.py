@@ -733,8 +733,10 @@ def _percussion(b, ir, sr: int = 16000):
 def cmd_tala(a):
     """``tala``: beat grid, laya and sama per recording (``ir['tala']``).
 
-    Annotated samas give the grid directly (beats subdivided evenly); otherwise
-    the grid is estimated from the percussion stems.  With ``--evaluate``, the
+    Annotated samas give the grid directly (beats subdivided evenly).  Without
+    them only the tala shape and Saraga's laya are stored, unless ``--estimate``
+    asks for the percussion-based estimate (marked ``reliable: false``; on the
+    63 annotated recordings it reaches a median beat F of only 0.29).  With ``--evaluate``, the
     estimator also runs on recordings *with* annotated samas and is scored
     against them (beat F-measure and sama hit rate within 70 ms, beat period
     error); nothing is written in that mode."""
@@ -780,11 +782,20 @@ def cmd_tala(a):
             beats, index = grid_from_samas(samas, shape[0])
             source, conf = "manual_sama", 1.0
             period = float(np.median(np.diff(samas))) / shape[0]
-        else:
+        elif a.estimate:
             perc, bass, sr = _percussion(b, ir)
             beats, index, period, conf = estimate_grid(perc, bass, sr, shape[0])
             source = "estimated"
-        ir["tala"] = {"source": source, "phase_conf": round(conf, 3), "beats_per_cycle": shape[0],
+        else:
+            # the estimator is not reliable enough to label matra (see README), so
+            # without annotated samas only the shape and Saraga's laya are kept
+            ir["tala"] = {"source": "none", "beats_per_cycle": shape[0], "aksharas_per_beat": shape[1],
+                          "laya_bpm": tempo[1] if tempo else None}
+            b.save(ir)
+            b.mark("tala", source="none")
+            continue
+        ir["tala"] = {"source": source, "reliable": source == "manual_sama", "phase_conf": round(conf, 3),
+                      "beats_per_cycle": shape[0],
                       "aksharas_per_beat": shape[1], "laya_bpm": round(60.0 / period, 2),
                       "beats": np.round(beats, 3).tolist(), "beat_index": index.tolist(),
                       "samas": np.round(beats[index == 0], 3).tolist()}
@@ -1181,6 +1192,8 @@ def main(argv=None):
     s = sub.add_parser("tala", help="beat grid, laya and sama (ir.json tala); --evaluate scores the estimator")
     s.add_argument("--mbids", default="")
     s.add_argument("--evaluate", action="store_true", help="score estimation on recordings with manual samas")
+    s.add_argument("--estimate", action="store_true",
+                   help="also estimate grids where no samas are annotated (unreliable: see README)")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_tala, stems_only=True)
 

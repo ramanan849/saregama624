@@ -117,8 +117,9 @@ def section_class_at(t: float, sections: Sequence[dict]) -> Optional[str]:
 
 
 def _matra(t: float, tala: dict, sections: Sequence[dict]):
-    """(beat, akshara, sam) at ``t`` when a tala cycle is running there, else Nones."""
-    if not tala or tala.get("source") in (None, "unknown") or section_class_at(t, sections) not in TALA_SECTIONS:
+    """(beat, akshara, sam) at ``t`` when a reliable tala grid (annotated samas)
+    covers a section where a cycle runs, else Nones."""
+    if not tala or not tala.get("reliable") or section_class_at(t, sections) not in TALA_SECTIONS:
         return None, None, None
     m = matra_of(t, np.asarray(tala["beats"]), np.asarray(tala["beat_index"]), tala["aksharas_per_beat"])
     return m if m is not None else (None, None, None)

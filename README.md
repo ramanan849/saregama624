@@ -283,8 +283,19 @@ the sama annotations; Ādi, for example, is `…, 32, 4`, i.e. 8 beats of 4 aksh
      `phase_conf` is its margin over the runner-up.
 - **Output:** `ir.json['tala']` with `source`, `laya_bpm`, `beats_per_cycle`,
   `aksharas_per_beat`, `beats`, `beat_index` (0 = sama), `samas` and `phase_conf`.
-- **Evaluation:** `tala --evaluate` scores the estimator against the annotated
-  recordings (beat F-measure, sama hit rate within 70 ms, period error).
+- **Evaluation:** `tala --evaluate` scores the estimator against the 58 annotated
+  recordings it can run on.
+  - Beat period within 2 %: only 28 % of recordings; errors cluster at ×¾, ×½ and ×2.
+  - Median beat F-measure: 0.29.
+  - Median sama hit rate (within 70 ms): 6 %.
+
+  Real mridangam accents and subdivisions defeat it, although it works on synthetic
+  clicks. So by default `tala` writes grids only from annotated samas (`source:
+  manual_sama`, `reliable: true`; 63 recordings, 13 h). Elsewhere it keeps the tala
+  shape and Saraga's laya (`source: none`). `--estimate` writes estimated grids marked
+  `reliable: false`, and the exports fill matra / sam only from reliable grids. Tala
+  tracking for the other recordings needs a dedicated meter-tracking model; it is
+  listed under next steps.
 
 ### 6. `align` — `stages/align_spikes.py` (default), `stages/align_kriti.py`
 
@@ -662,6 +673,8 @@ No test needs a GPU or a model download.
   - Known errors on the pilot: one false line match in Mati Matiki (around 1193 s)
     and a parse artifact in Dinamani Vamsa ("sarvasvamau").
 - **Tonic.** Recordings flagged `tonic_ambiguous` need a listen.
+- **Tala.** Matra and sam exist only for the 63 recordings with annotated samas (13 h);
+  the percussion-based estimator is not reliable (median beat F 0.29).
 
 **Next steps**
 1. The Probe-40 Carnatic set, and an SVC rendering check: does SoulX's F0 conditioning

@@ -123,8 +123,8 @@ def beat_period(env: np.ndarray, beats_per_cycle: int, fps: int = ONSET_FPS) -> 
         y0, y1, y2 = ac[c - 1], ac[c], ac[c + 1]      # parabolic peak: sub-frame period
         den = y0 - 2 * y1 + y2
         off = 0.5 * (y0 - y2) / den if abs(den) > 1e-12 else 0.0
-        return (c + off) / beats_per_cycle / fps
-    return lag / fps
+        return float((c + off) / beats_per_cycle / fps)
+    return float(lag / fps)
 
 
 def track_beats(env: np.ndarray, period_s: float, fps: int = ONSET_FPS) -> np.ndarray:
