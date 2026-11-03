@@ -74,3 +74,29 @@ def test_long_hold_inside_a_line_is_resumed():
     assert [i.line_id for i in inst] == [0, 1]
     assert inst[0].complete and "resumed" in inst[0].flags
     assert [w.text for w in inst[0].words] == ["sarigama", "padani"]
+
+
+def test_mark_overlap_share_of_other_singer():
+    """overlap = share of an instance's frames in which the other voice is voiced."""
+    from saregama.stages.align_kriti import Instance, mark_overlap
+    other = np.zeros(1000, bool)
+    other[100:150] = True                                   # other singer sings 1.0-1.5 s
+    a = Instance(0, "pallavi", 1.0, 2.0, 0.0, True)         # half of it overlaps
+    b = Instance(0, "pallavi", 5.0, 6.0, 0.0, True)         # solo
+    mark_overlap([a, b], other, fps=100)
+    assert a.overlap == 0.5 and b.overlap == 0.0
+    assert a.singer == "lead"
+
+
+def test_other_section_start_costs_a_jump():
+    """From inside caranam 3, its own start and the pallavi are cheap returns;
+    the start of caranam 1 is a full jump."""
+    sections = [{"name": "pallavi", "lines": ["ninnu kori"]},
+                {"name": "caraNam 1", "lines": ["pankaja vadana", "sarasa"]},
+                {"name": "caraNam 3", "lines": ["raja bhanga", "sujana"]}]
+    lines = lyric_lines(sections)
+    cfg = AlignCfgK()
+    P = transition_penalties(lines, [0, 1, 2, 3, 4], cfg)
+    assert P[4, 3] == cfg.ret and P[4, 0] == cfg.ret        # own section start, pallavi
+    assert P[4, 1] == cfg.jump                              # another caranam's start
+    assert P[5, 1] == cfg.ret                               # region start may begin any section

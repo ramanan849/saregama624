@@ -37,6 +37,7 @@ import yaml
 USER_AGENT = "saregama624/0.1 (+https://github.com/ramanan849/saregama624)"
 KARNATIK = "https://www.karnatik.com/"
 MUSICBRAINZ = "https://musicbrainz.org/ws/2/"
+LANGUAGES = {"telugu", "tamil", "kannada", "sanskrit", "malayalam", "hindi", "marathi", "manipravalam"}
 SECTION_NAMES = ("pallavi", "anupallavi", "caraNam", "samaShTi caraNam", "madhyama kAla sAhityam",
                  "ciTTasvaram", "ciTTa svaram", "svara sAhityam", "muktAyi svaram", "ettugaDa svaram",
                  "caraNam 1", "caraNam 2", "caraNam 3", "caraNam 4", "caraNam 5", "caraNam 6")
@@ -203,8 +204,9 @@ def parse_karnatik(page: str) -> dict:
     body = page[start:end if end > 0 else None]
     blocks = re.split(r"(?i)<p>", body)
     sections, current = [], None
-    names = {n.lower(): n for n in SECTION_NAMES}
-    is_head = lambda l: (l.strip().rstrip(":").lower() in names
+    head_key = lambda l: re.sub(r"\s+", "", l.strip().rstrip(":").lower()).replace("sw", "sv")
+    names = {head_key(n) for n in SECTION_NAMES}           # spaces and sw/sv spellings ignored
+    is_head = lambda l: (head_key(l) in names
                          or re.fullmatch(r"(caraNam|charanam)\s*\d*:?", l.strip(), re.I) is not None)
     # section headers ("pallavi", "caraNam 2", ...) may appear on any line, not only
     # at the start of a <p> block
@@ -221,6 +223,13 @@ def parse_karnatik(page: str) -> dict:
                 current.setdefault("repeat_markers", []).append(l.strip("()"))
                 continue
             if l.lower().startswith(("meaning", "other information", "notation", "variations")):
+                continue
+            if l.strip().lower() in LANGUAGES:              # header text spilling into the lyrics
+                continue
+            if len(l.split()) == 1 and current["lines"]:
+                # a one-word "line" is the wrapped tail of the previous one
+                # ("... tyAgarAja" / "sarvasvamau"); kriti lines are never one word
+                current["lines"][-1] += " " + l
                 continue
             current["lines"].append(l)
     out["sections"] = [s for s in sections if s["lines"]]

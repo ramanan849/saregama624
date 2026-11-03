@@ -251,7 +251,9 @@ default engine works on MMS letter **spikes** instead:
    - filler (not lyrics).
 3. The program runs over a **line-loop graph**:
    - from each line it can repeat the line, go to the next line, return to the
-     pallavi or the section start, or jump elsewhere;
+     pallavi or to its own section's start, or jump elsewhere (starting a
+     *different* section from inside one, say caraṇam 1 from caraṇam 3, costs a
+     full jump);
    - it can enter and leave a line mid-way, at word boundaries;
    - in kalpana svara it can also sing the sargam syllables sa…ni, which need only
      their consonant heard.
@@ -284,7 +286,8 @@ of every 100 Hz array is at t = k / 100 s.
 | `flat_100hz.npz` | `fps`, `flat_cents` |
 | `swaras.json` | `raga`, `raga_swaras`, `positions_cents`, `summary`, `segments[]` |
 | `lyrics.json` | `source`, `lines[]`, `instances[]`, `regions[]` |
-| `mms_50hz.npz` | `logp`: cached MMS_FA log-probabilities (float16) |
+| `lyrics_vocal-s.json` | the same for the second singer (duets) |
+| `mms_50hz.npz`, `mms_50hz_vocal-s.npz` | `logp`: cached MMS_FA log-probabilities (float16) |
 | `review/` | `contour.pdf`, `*.svl`, `sync_preview.flac`, `README.txt`, `corrected/` |
 
 ### `ir.json` keys
@@ -318,7 +321,7 @@ of every 100 Hz array is at t = k / 100 s.
   - `voiced` and `agree_voiced`;
   - `vs_saraga.<track>`: `lag_ms`, `rpa50`, `octave_err`, `both_voiced`, or
     `skipped`.
-- `qc.swaras` (the swara summary) and `qc.align`:
+- `qc.swaras` (the swara summary), and `qc.align` / `qc.align_vocal-s` (duets):
   - `instances`, `lyric_s`, `low_conf`, `sargam`;
   - `lines_seen`, `n_lines`, `lyrics_verified`.
 - `flags[]`, `status` (`auto` or `reviewed`), and `review` (reviewer, layers).
@@ -342,7 +345,7 @@ of every 100 Hz array is at t = k / 100 s.
             "words": ["bhuvini", ...], "syllables": [["bhu", "vi", "ni"], ...]}],
  "instances": [{"line_id": 0, "section": "pallavi", "start": 7.44, "end": 16.43,
                 "llr": -0.51, "complete": false, "region": "Pallavi",
-                "flags": ["matched_9_of_57"],
+                "flags": ["matched_9_of_57"], "singer": "lead", "overlap": 0.0,
                 "words": [{"text": "dasudan", "start": 7.44, "end": 13.9,
                            "syllables": [{"text": "da", "start": 7.44, "end": 12.54}, ...]}]}],
  "regions": [{"label": "Pallavi", "kind": "lyrics", "start": 0.07, "end": 85.36,
@@ -351,6 +354,14 @@ of every 100 Hz array is at t = k / 100 s.
 
 **Instances.** An instance is one sung occurrence of a lyric line, so a line usually
 has many.
+
+**Duets.** Each cleaned vocal stem is aligned on its own: `lyrics.json` for the lead,
+`lyrics_vocal-s.json` for the second singer. The two usually sing the same line in
+heterophonic unison (pitch within 200 cents on about 80 % of shared frames, best at
+0 ms lag) and take turns in kalpana svara and alapana. `overlap` is the share of an
+instance during which the *other* singer is voiced. Exporters should prefer
+`overlap ≈ 0` stretches, where a stem carries no unison bleed. `qc.align_vocal-s`
+and the `solo_s` totals summarise this.
 
 **Sargam.** Sargam syllables are instances whose `section` is `"sargam"`. Their
 `line_id` is a pseudo-line numbered after the lyric lines.
@@ -365,6 +376,9 @@ and stored in `annotations/lyrics/`.
 2. karnatik.com's index (about 8,000 songs) is fuzzy-matched on title, raga and
    composer.
 3. The top candidate pages are parsed into pallavi / anupallavi / caraṇam lines.
+   Section headers are recognised on any line, ignoring spaces and the sw/sv
+   spelling (`ciTTaswaram`). A one-word "line" is joined to the line before it
+   (karnatik.com wraps long lines), and stray language names are dropped.
 4. A candidate with a match score ≥ 0.9 and raga similarity ≥ 0.85 is pre-selected
    (`source: auto`).
 
@@ -404,6 +418,7 @@ Lyrics are for internal annotation only and are not redistributed.
 | `lines.svl` | regions labelled `<line_id>\|<section>\|<text>` |
 | `words.svl`, `syllables.svl` | regions (syllables drawn at their median F0) |
 | `sections.svl`, `sama.svl` | regions, time instants |
+| `*_vocal-s.svl` | duets: the second singer's F0, lines, words, syllables (view only) |
 | `sync_preview.flac` | left: cleaned vocal; right: a sine on the F0, a tick per syllable onset, a knock per sama |
 | `README.txt` | the exact open and import commands for this recording |
 

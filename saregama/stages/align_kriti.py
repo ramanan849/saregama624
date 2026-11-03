@@ -229,7 +229,15 @@ def with_sargam(lines: List[Line]) -> List[Line]:
 def transition_penalties(lines: List[Line], allowed: Sequence[int], cfg: AlignCfgK,
                          free: Sequence[int] = ()) -> np.ndarray:
     """(L+1, L): row l = after line l (row L = start of the region).  Lines
-    in ``free`` (sargam syllables) can follow anything at no cost."""
+    in ``free`` (sargam syllables) can follow anything at no cost.
+
+    Cheap returns (``ret``) after a line are the region's first allowed line
+    (the pallavi, which comes back after every section) and the first line of
+    the line's *own* section.  Starting a *different* section from inside one
+    costs a full ``jump``: a singer who is in caranam 3 does not hop to the
+    start of caranam 1 (seen as a false match on the pilot).  A region may start
+    at any section's first line for ``ret``.
+    """
     L = len(lines)
     P = np.full((L + 1, L), NEG)
     allowed = sorted(set(allowed))
@@ -238,16 +246,17 @@ def transition_penalties(lines: List[Line], allowed: Sequence[int], cfg: AlignCf
     sec_first = {}
     for l in allowed:
         sec_first.setdefault(lines[l].section, l)
-    returns = set(sec_first.values()) | {allowed[0]}
+    starts = set(sec_first.values()) | {allowed[0]}
     for src in range(L + 1):
+        own_start = sec_first.get(lines[src].section) if src < L else None
         for dst in allowed:
             if src == L:
-                p = 0.0 if dst == allowed[0] else (cfg.ret if dst in returns else cfg.jump)
+                p = 0.0 if dst == allowed[0] else (cfg.ret if dst in starts else cfg.jump)
             elif dst == src + 1:
                 p = 0.0
             elif dst == src:
                 p = cfg.repeat
-            elif dst in returns:
+            elif dst == allowed[0] or dst == own_start:
                 p = cfg.ret
             else:
                 p = cfg.jump
@@ -452,6 +461,11 @@ class Instance:
     confidence (trellis: mean letter-vs-filler log-likelihood ratio; spikes:
     mean log p(letter | non-blank) of matched spikes); ``flags`` e.g.
     ``low_conf``, ``resumed``, ``matched_X_of_Y``, ``reviewed``.
+
+    ``singer`` is ``lead`` or ``second`` (duets: each cleaned vocal stem is
+    aligned on its own); ``overlap`` is the share of the instance during which
+    the *other* singer is voiced (0 for solo recordings), so exporters can
+    prefer solo stretches, where the stem carries no unison bleed.
     """
     line_id: int
     section: str
@@ -462,6 +476,8 @@ class Instance:
     region: str = ""              # Saraga section label it was found in
     words: List[WordSpan] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
+    singer: str = "lead"
+    overlap: float = 0.0
 
 
 def instances_from_path(line_path, state_path, logp, g: Graph, cfg: AlignCfgK, blank: int,
@@ -527,6 +543,15 @@ def instances_from_path(line_path, state_path, logp, g: Graph, cfg: AlignCfgK, b
         for k in ("_first_pos", "_last_pos", "_frames", "_llr_sum"):
             inst.__dict__.pop(k, None)
     return out
+
+
+def mark_overlap(instances: List[Instance], other_voiced: np.ndarray, fps: float = 100.0) -> None:
+    """Set each instance's ``overlap``: the share of its frames in which the
+    other singer of a duet is voiced.  In place."""
+    n = len(other_voiced)
+    for inst in instances:
+        a, b = int(inst.start * fps), min(n, int(np.ceil(inst.end * fps)))
+        inst.overlap = round(float(other_voiced[a:b].mean()), 3) if b > a else 0.0
 
 
 def extend_sustain(instances: List[Instance], voiced: np.ndarray, fps: float = 100.0,

@@ -10,6 +10,9 @@
 * ``syllables.svl``    region layer at the syllable's median F0, label = syllable
 * ``sections.svl``     region layer, label = section name
 * ``sama.svl``         time-instant layer
+* ``f0_vocal-s.svl``, ``lines_vocal-s.svl``, ``words_vocal-s.svl``,
+  ``syllables_vocal-s.svl``   duets only: the second singer's own F0 and alignment
+  (for viewing; ``review-import`` reads the lead singer's layers)
 * ``sync_preview.flac`` stereo: left = cleaned vocal; right = a sine following the F0,
   a short tick at every syllable onset and a lower knock on every sama
 * ``README.txt``       how to open everything
@@ -37,7 +40,6 @@ import soundfile as sf
 from .ir import Bundle
 
 SV_SR = 44100
-LAYERS = ("f0", "flat", "swaras", "lines", "words", "syllables", "sections", "sama")
 EDITABLE = ("lines", "words", "syllables", "sections", "sama")
 
 
@@ -140,22 +142,19 @@ def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
                for s in sw["segments"] if s["kind"] in ("stable", "kampita")]
         put("swaras", _svl("regions", "swaras", pts, end_s, "#1baf7a", "Hz"))
 
-    lyr = json.loads(b.path("lyrics.json").read_text(encoding="utf-8")) if b.path("lyrics.json").exists() else None
+    lyr = _read_json(b.path("lyrics.json"))
     if lyr:
-        texts = {l["id"]: l["text"] for l in lyr.get("lines", [])}
-        lines, words, syls = [], [], []
-        for inst in lyr["instances"]:
-            text = texts.get(inst["line_id"], " ".join(w["text"] for w in inst["words"]))
-            lines.append({"start": inst["start"], "end": inst["end"], "value": 0.0,
-                          "label": f'{inst["line_id"]}|{inst["section"]}|{text}'})
-            for w in inst["words"]:
-                words.append({"start": w["start"], "end": w["end"], "value": 0.0, "label": w["text"]})
-                for s in w["syllables"]:
-                    syls.append({"start": s["start"], "end": s["end"], "label": s["text"],
-                                 "value": _median_hz(f0, fps, s["start"], s["end"], tonic)})
-        put("lines", _svl("regions", "lines", lines, end_s, "#52514e"))
-        put("words", _svl("regions", "words", words, end_s, "#8a8985"))
-        put("syllables", _svl("regions", "syllables", syls, end_s, "#eb6834", "Hz"))
+        for name, kind, pts, colour, units in _lyric_layers(lyr, f0, fps, tonic):
+            put(name, _svl(kind, name, pts, end_s, colour, units))
+    # duets: the second singer's own F0 and alignment, as "<layer>_vocal-s"
+    if b.path("f0_100hz_vocal-s.npz").exists():
+        f0s = np.load(b.path("f0_100hz_vocal-s.npz"))["f0_hz"].astype(float)
+        put("f0_vocal-s", _svl("timevalues", "F0 (vocal-s_clean)", _curve(t[:len(f0s)], f0s), end_s,
+                               "#8a8985", "Hz", res, 6))
+        lyr2 = _read_json(b.path("lyrics_vocal-s.json"))
+        if lyr2:
+            for name, kind, pts, colour, units in _lyric_layers(lyr2, f0s, fps, tonic):
+                put(f"{name}_vocal-s", _svl(kind, f"{name} (second singer)", pts, end_s, colour, units))
 
     put("sections", _svl("regions", "sections",
                          [{"start": s["start"], "end": s["end"], "value": 0.0, "label": s["label"]}
@@ -171,12 +170,35 @@ def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
     return layers
 
 
+def _read_json(path: Path) -> Optional[dict]:
+    """Parsed JSON file, or None if it does not exist."""
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _lyric_layers(lyr: dict, f0: np.ndarray, fps: float, tonic: float):
+    """(name, kind, points, colour, units) of the lines / words / syllables layers
+    of one ``lyrics.json``; syllables sit at their median F0."""
+    texts = {l["id"]: l["text"] for l in lyr.get("lines", [])}
+    lines, words, syls = [], [], []
+    for inst in lyr["instances"]:
+        text = texts.get(inst["line_id"], " ".join(w["text"] for w in inst["words"]))
+        lines.append({"start": inst["start"], "end": inst["end"], "value": 0.0,
+                      "label": f'{inst["line_id"]}|{inst["section"]}|{text}'})
+        for w in inst["words"]:
+            words.append({"start": w["start"], "end": w["end"], "value": 0.0, "label": w["text"]})
+            for s in w["syllables"]:
+                syls.append({"start": s["start"], "end": s["end"], "label": s["text"],
+                             "value": _median_hz(f0, fps, s["start"], s["end"], tonic)})
+    return [("lines", "regions", lines, "#52514e", ""), ("words", "regions", words, "#8a8985", ""),
+            ("syllables", "regions", syls, "#eb6834", "Hz")]
+
+
 def _readme(ir: dict, b: Bundle) -> str:
     """Text of ``review/README.txt``: what is in the folder and the exact
     commands to open and to re-import it.
     """
     vocal = b.dir / ir["stems"]["vocal_clean"]["path"]
-    svl = " ".join(f"{n}.svl" for n in LAYERS if (b.review_dir / f"{n}.svl").exists())
+    svl = " ".join(sorted(p.name for p in b.review_dir.glob("*.svl")))
     return f"""{ir["title"]} ({ir.get("raaga", "")}, {ir.get("taala", "")}); Sa = {ir["tonic_hz"]} Hz
 All times are on the mix clock: {ir["mix"]}
 

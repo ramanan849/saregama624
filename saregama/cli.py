@@ -491,21 +491,32 @@ def cmd_lyrics_verify(a):
     print(f"verified {doc['title']} <- {doc['selected']}")
 
 
+# (cleaned vocal stem, file suffix, singer) -- duets have a second singer's stem
+VOICES = (("vocal_clean", "", "lead"), ("vocal-s_clean", "_vocal-s", "second"))
+
+
 def cmd_align(a):
     """``align``: time-align the selected lyrics of each recording.
 
-    MMS_FA log-probabilities of ``vocal_clean`` are cached in ``mms_50hz.npz``;
-    the spike (default) or trellis engine aligns each Saraga section; syllables
-    are extended through voicing; ``lyrics.json`` and ``ir.json['qc']['align']``
-    are written.  Reviewed recordings are never re-aligned.
+    Every cleaned vocal stem is aligned on its own (``VOICES``: the lead, and the
+    second singer of a duet).  Per voice: MMS_FA log-probabilities are cached
+    in ``mms_50hz[_vocal-s].npz``; the spike (default) or trellis engine aligns
+    each Saraga section; syllables are extended through that voice's voicing;
+    in duets each instance gets the share of time the other singer sings along
+    (``overlap``).  Writes ``lyrics[_vocal-s].json`` and
+    ``ir.json['qc']['align' | 'align_vocal-s']``.  Reviewed recordings are never
+    re-aligned.
     """
     import numpy as np
     import soundfile as sf
+    import torchaudio
     import yaml
     from .audio import resample
     from .ir import Bundle
-    from .stages.align_kriti import AlignCfgK, MmsEmitter, align_regions, lyric_lines, to_json
+    from .stages.align_kriti import (AlignCfgK, MmsEmitter, align_regions, extend_sustain, lyric_lines,
+                                     mark_overlap, to_json)
     cfg = AlignCfgK(device=a.device, filler_cost=a.filler_cost)
+    vocab = dict(torchaudio.pipelines.MMS_FA.get_dict(star=None))
     em = None
     recs = _saraga_recs(a)
     for i, r in enumerate(recs, 1):
@@ -524,45 +535,56 @@ def cmd_align(a):
             print(f"[{i}/{len(recs)}] {r.title}: no lyrics selected ({lpath.name})", flush=True)
             continue
         lines = lyric_lines(doc["lyrics"])
-        emit_path = b.path("mms_50hz.npz")
-        if emit_path.exists():
-            logp = np.load(emit_path)["logp"].astype(np.float32)
-        else:
-            em = em or MmsEmitter(cfg)
-            ir = b.load()
-            x, sr = sf.read(str(b.dir / ir["stems"]["vocal_clean"]["path"]), dtype="float32")
-            logp = em(resample(x, sr, 16000))
-            np.savez_compressed(emit_path, logp=logp.astype(np.float16))
-        ir = b.load()
-        regions = ir.get("sections") or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}]
-        import torchaudio
-        vocab = dict(torchaudio.pipelines.MMS_FA.get_dict(star=None))
-        if a.engine == "spikes":
-            from .stages.align_spikes import SpikeCfg, align_regions_spikes
-            inst, rep = align_regions_spikes(logp, lines, regions, vocab, vocab["-"], SpikeCfg())
-        else:
-            inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
-        if b.path("f0_100hz.npz").exists():
-            from .stages.align_kriti import extend_sustain
-            extend_sustain(inst, np.load(b.path("f0_100hz.npz"))["f0_hz"] > 0)
         src = {"work_mbid": r.work_mbid, "selected": doc.get("selected"), "source": doc.get("source"),
                "verified": bool(doc.get("verified"))}
-        b.path("lyrics.json").write_text(json.dumps(to_json(lines, inst, rep, src), ensure_ascii=False),
-                                         encoding="utf-8")
-        lyric_s = sum(x.end - x.start for x in inst)
-        summ = {"instances": len(inst), "lyric_s": round(lyric_s, 1),
+        ir = b.load()
+        voices = [v for v in VOICES if v[0] in ir["stems"]]
+        voiced = {v[1]: np.load(b.path(f"f0_100hz{v[1]}.npz"))["f0_hz"] > 0
+                  for v in voices if b.path(f"f0_100hz{v[1]}.npz").exists()}
+        summaries = {}
+        for stem, suffix, singer in voices:
+            emit_path = b.path(f"mms_50hz{suffix}.npz")
+            if emit_path.exists():
+                logp = np.load(emit_path)["logp"].astype(np.float32)
+            else:
+                em = em or MmsEmitter(cfg)
+                x, sr = sf.read(str(b.dir / ir["stems"][stem]["path"]), dtype="float32")
+                logp = em(resample(x, sr, 16000))
+                np.savez_compressed(emit_path, logp=logp.astype(np.float16))
+            regions = ir.get("sections") or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}]
+            if a.engine == "spikes":
+                from .stages.align_spikes import SpikeCfg, align_regions_spikes
+                inst, rep = align_regions_spikes(logp, lines, regions, vocab, vocab["-"], SpikeCfg())
+            else:
+                inst, rep = align_regions(logp, lines, regions, vocab, vocab["-"], cfg)
+            if suffix in voiced:
+                extend_sustain(inst, voiced[suffix])
+            for x in inst:
+                x.singer = singer
+            others = [v for k, v in voiced.items() if k != suffix]
+            if others:                                  # duet: how much the other voice sings along
+                mark_overlap(inst, others[0])
+            b.path(f"lyrics{suffix}.json").write_text(
+                json.dumps(to_json(lines, inst, rep, src), ensure_ascii=False), encoding="utf-8")
+            summaries[singer] = {
+                "instances": len(inst), "lyric_s": round(sum(x.end - x.start for x in inst), 1),
                 "low_conf": sum("low_conf" in x.flags for x in inst),
                 "sargam": sum(x.section == "sargam" for x in inst),
                 "mean_llr": round(float(np.mean([x.llr for x in inst])), 3) if inst else None,
                 "lines_seen": sorted({x.line_id for x in inst}), "n_lines": len(lines),
                 "lyrics_verified": src["verified"]}
+            if others:
+                summaries[singer]["solo_s"] = round(sum((x.end - x.start) * (1 - x.overlap) for x in inst), 1)
         ir = b.load()
-        ir.setdefault("qc", {})["align"] = summ
+        ir.setdefault("qc", {})["align"] = summaries["lead"]
+        if "second" in summaries:
+            ir["qc"]["align_vocal-s"] = summaries["second"]
         if not src["verified"]:
             ir["flags"] = sorted(set(ir.get("flags", [])) | {"lyrics_unverified"})
         b.save(ir)
-        b.mark("align", engine=a.engine, **summ)
-        print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summ)}", flush=True)
+        summ = summaries["lead"]
+        b.mark("align", engine=a.engine, **summ, **({"second": summaries["second"]} if "second" in summaries else {}))
+        print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summaries)}", flush=True)
 
 
 def cmd_review_export(a):
