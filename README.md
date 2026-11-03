@@ -543,6 +543,12 @@ pick as wrong or the lyrics as still missing. The page's decisions, exported as 
 are applied with `lyrics-apply --reviews decisions.json`, which shares its logic with
 `lyrics-verify`.
 
+How the page is fed:
+- The excerpts (audio-only MP4) are uploaded to the page's asset store.
+- Each composition is a document in its `works` collection, which only editors can
+  write.
+- Each decision is a document in `reviews`, which Contributors can write.
+
 For `--text`, write a section name ending in `:` (for example `pallavi:`) on its own
 line, followed by that section's lines; `#` starts a comment. After verifying, re-run
 `align --force` for the recordings of that composition.

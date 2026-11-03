@@ -535,8 +535,12 @@ def cmd_lyrics_review_pack(a):
     """``lyrics-review-pack``: what the lyrics review page shows.  Writes
     ``<out>/works.json`` (per composition: status, candidates with their parsed
     sections, the recordings that use it, the excerpt file) and
-    ``<out>/excerpts/<work_mbid>.mp3``: 20 s of a recording's mix, starting at
-    its first aligned lyric line, else at its pallavi, else a quarter in."""
+    ``<out>/excerpts/<work_mbid>.mp3`` (and ``.mp4``, AAC, when ffmpeg is
+    available: the format the review page's asset store accepts): 20 s of a
+    recording's mix, starting at its first aligned lyric line, else at its
+    pallavi, else a quarter in."""
+    import shutil
+    import subprocess
     import numpy as np
     import soundfile as sf
     import yaml
@@ -581,6 +585,10 @@ def cmd_lyrics_review_pack(a):
                 fade = np.minimum(1.0, np.minimum(np.arange(len(seg)), np.arange(len(seg))[::-1]) / (0.5 * sr))
                 sf.write(str(out / "excerpts" / clip), (0.9 * seg * fade / (np.abs(seg).max() + 1e-9)).astype(np.float32),
                          sr, format="MP3", subtype="MPEG_LAYER_III")
+                if shutil.which("ffmpeg"):          # web pages / artifact assets take audio-only MP4 (AAC)
+                    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(out / "excerpts" / clip), "-c:a", "aac",
+                                    "-b:a", "64k", "-ac", "1", "-movflags", "+faststart",
+                                    str(out / "excerpts" / f"{wm}.mp4")], check=True)
         mb = doc.get("musicbrainz") or {}
         works.append({"work_mbid": wm, "title": doc.get("title", ""), "raga": doc.get("raga", ""),
                       "composer": "; ".join(mb.get("composer") or []), "languages": mb.get("languages") or [],

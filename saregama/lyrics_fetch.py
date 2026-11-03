@@ -47,6 +47,7 @@ KARNATIK = "https://www.karnatik.com/"
 MUSICBRAINZ = "https://musicbrainz.org/ws/2/"
 LANGUAGES = {"telugu", "tamil", "kannada", "sanskrit", "malayalam", "hindi", "marathi", "manipravalam"}
 SECTION_NAMES = ("pallavi", "anupallavi", "caraNam", "samaShTi caraNam", "madhyama kAla sAhityam",
+                 "madhyama kAlam", "madhyama kaalam", "madhyamakAla sAhityam",
                  "ciTTasvaram", "ciTTa svaram", "svara sAhityam", "muktAyi svaram", "ettugaDa svaram",
                  "caraNam 1", "caraNam 2", "caraNam 3", "caraNam 4", "caraNam 5", "caraNam 6")
 
@@ -236,6 +237,8 @@ def parse_karnatik(page: str) -> dict:
                 continue
             if l.strip().lower() in LANGUAGES:              # header text spilling into the lyrics
                 continue
+            if re.match(r"(?i)^\s*(aa|av|aro|ava|arohanam|avarohanam)\s*:", l):
+                continue                                  # the raga's scale ("Aa: S R2 G2 ..."), not lyrics
             if len(l.split()) == 1 and current["lines"]:
                 # a one-word "line" is the wrapped tail of the previous one
                 # ("... tyAgarAja" / "sarvasvamau"); kriti lines are never one word
