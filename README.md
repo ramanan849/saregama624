@@ -449,6 +449,15 @@ and stored in `annotations/lyrics/`.
 - `_cache/`: raw pages. Requests are rate-limited (1/s per host) and sent with a
   generic User-Agent.
 
+**Transliteration** (`saregama/translit.py`). karnatik.com writes lyrics in a
+Harvard-Kyoto-like ASCII scheme. `to_iso` gives ISO-15919 (`dAsuDanE` → `dāsuḍanē`) and
+`to_phones` gives phones of `saregama/phoneset.py` with South Indian pronunciation: ṛ
+is sung "ru", anusvara takes the next consonant's nasal, visarga is h, and ai/au are
+diphthongs. Svara-notation lines (`pdsrsm…`) are recognised and sung as sargam. All
+3,315 words of the selected lyrics convert; unknown letters raise an error rather than
+producing a wrong phone. The aligner keeps its plain romanisation; `fit_syllables`
+reconciles phone syllables with aligned syllables when their counts differ.
+
 **Verifying** (`lyrics-verify`). Auto-selected lyrics are used for alignment, but the
 recording is flagged `lyrics_unverified` until a person confirms them.
 
@@ -532,6 +541,7 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/stages/swaras.py` | raga table, swara segmentation, flat contour |
 | `saregama/viz.py` | contour sheets (PDF) |
 | `saregama/lyrics_fetch.py` | MusicBrainz + karnatik.com lyric candidates |
+| `saregama/translit.py` | karnatik.com scheme → ISO-15919 and Indic phones; svara notation |
 | `saregama/stages/sections.py` | automatic sections (features, classifier, smoothing) |
 | `saregama/stages/tala.py` | beat grid, laya, sama (from annotations or estimated) |
 | `saregama/stages/align_spikes.py` | default lyric aligner (spike DP) |
@@ -576,6 +586,7 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_sections.py` | label mapping, smoothing, region merging, rules baseline |
 | `test_tala.py` | tala shapes, grids from samas, matra lookup, metrics, estimation on a synthetic track |
 | `test_lyrics_parse.py`, `test_lyrics_status.py` | karnatik.com parsing; status table |
+| `test_translit.py` | ISO-15919 spelling, phones, syllable fitting, notation lines |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |
@@ -586,8 +597,7 @@ No test needs a GPU or a model download.
 
 **Limitations**
 - **Lyrics.** 61 of 133 compositions have no lyrics yet. None of the 72 auto-matched
-  ones have been verified by a person. The romanisation follows karnatik.com's
-  scheme, not ISO-15919.
+  ones have been verified by a person.
 - **Alignment.**
   - It covers 160–450 s of lyrics per recording; heavy melisma still drops out.
   - It has not been measured against hand labels.

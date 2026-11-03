@@ -1,4 +1,5 @@
-"""Shared Indic phoneme inventory for Hindi, Marathi and Tamil.
+"""Shared Indic phoneme inventory for Hindi, Marathi, Tamil, and (via
+``saregama.translit``) Carnatic Telugu / Sanskrit / Kannada lyrics.
 
 Every phone is an ASCII name (no '-' allowed, because SoulX-Singer splits a note's
 phoneme string on '-').  In SoulX metadata a note looks like ``in_k-aa-m``: the
@@ -52,6 +53,8 @@ PHONES: List[Phone] = [
     _P("E", "ɛ", "vowel", "ai", ("en_EH1",)),         # Hindi ऐ
     _P("O", "ɔ", "vowel", "au", ("en_AO1",)),         # Hindi औ, Marathi ऑ
     _P("ae", "æ", "vowel", "ae", ("en_AE1",)),        # Marathi ॲ/ऍ
+    _P("ai", "ai", "vowel", "ai", ("en_AY1",)),       # Carnatic ai (Telugu/Sanskrit/Kannada/Tamil diphthong)
+    _P("au", "au", "vowel", "au", ("en_AW1",)),       # Carnatic au
     _P("nas", "̃", "mark", "n", ("en_N",)),            # nasalisation of the preceding vowel
     # ---- velar --------------------------------------------------------
     _P("k", "k", "consonant", "k", ("en_K",)),
