@@ -40,7 +40,7 @@ Steps 1–7 run end to end on a 10-recording pilot
 | 5 Lyrics | `lyrics-fetch`, `lyrics-verify` | 72 / 133 compositions matched automatically, none verified by a person yet |
 | 6 Alignment | `align` | 7 pilot songs aligned; sync validated to within ~50 ms |
 | 7 Review | `review-export`, `review-import` | Sonic Visualiser layers + sync preview; lossless round trip |
-| 8 Export | *(not written yet)* | ICM-IR dataset and SoulX-Singer clips |
+| 8 Export | `export-ir` (SoulX clips: next) | ICM-IR v0 dataset; runs on the pilot |
 
 The 168 multitrack recordings have not been run yet; only the pilot has.
 
@@ -126,6 +126,7 @@ $S align           --mbids $P                 # 6  time-aligned lyrics
 $S viz             --mbids $P                 #    review/contour.pdf
 $S review-export   --mbids $P                 # 7  Sonic Visualiser layers + sync preview
 $S review-import   --mbids <id> --reviewer <name>
+$S export-ir                                  # 8  ICM-IR v0 dataset -> annotations/export/icm_ir_v0
 ```
 
 `scripts/run_stages.sh <mbids-file> <gpu> [stage ...]` runs stages in order over a
@@ -320,6 +321,26 @@ takes about 0.1 s per recording.
 **Validation.** In kalpana svara, the sung sargam syllable matches the pitch track's
 swara 45 % of the time (chance is 16 %). The match peaks within 50 ms of zero time
 shift, which confirms the stems, F0 and lyrics share one clock to about 50 ms.
+
+### 8. `export-ir` — `saregama/export_ir.py`
+
+This writes the ICM-IR v0 dataset (the Phase 1 Model Landscape's spec) from the
+bundles into `annotations/export/icm_ir_v0/`. The bundles stay the editable record.
+
+| File | Level | Contents |
+|---|---|---|
+| `recordings.parquet` | global | tonic, raga, tala, laya (bpm), form, singer ids, duet, lyric status, section and tala source, split, flags |
+| `syllables.parquet` | syllable | aligned text, ISO-15919, phones, start / duration, line / word / section, singer, beat / akshara / sam, `low_conf`, duet `overlap` |
+| `swaras.parquet` | swara | kind, IR name (`Sa Re_k Re Ga_k Ga Ma Ma_t Pa Dha_k Dha Ni_k Ni`) + octave, svarasthana resolved for the raga (R2 vs G1, G2 vs R3, …), cents, beat / akshara / sam |
+| `frames/<mbid>.npz` | 100 Hz | `cents_q` (cents re Sa in 10-cent steps, int16, −32768 unvoiced), `voiced`, `loudness_db`, `conf`, `phone_id`, `flat_cents_q` (the S2 flat → expressive pair); duets add `*_second` |
+| `phones.json`, `splits.json`, `DATASHEET.md` | — | phone ids, the concert-level split, provenance and licence (Saraga: CC BY-NC 4.0) |
+
+- **Splits** are by concert, so no singer appears in two splits. `--test-concerts` and
+  `--val-concerts` force concerts into a split; the rest are assigned
+  deterministically.
+- **Phone timing.** `phone_id` places the consonants at a syllable's edges and lets the
+  vowel fill the rest. Only the syllable span is aligned, not each phone.
+- **Matra.** The matra fields are filled only inside kriti / svara / tani sections.
 
 ### 7. `review-export`, `review-import` — `saregama/review_sv.py`
 
@@ -547,6 +568,7 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/stages/align_spikes.py` | default lyric aligner (spike DP) |
 | `saregama/stages/align_kriti.py` | text, line graph, section rules, MMS emitter, trellis engine |
 | `saregama/review_sv.py` | Sonic Visualiser export / import, sync preview |
+| `saregama/export_ir.py` | ICM-IR v0 dataset export |
 | `saregama/cli.py` | all commands |
 
 **Legacy** (ported from `indic-svs-annotator`, for film songs: songs.csv workspaces,
@@ -587,6 +609,7 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_tala.py` | tala shapes, grids from samas, matra lookup, metrics, estimation on a synthetic track |
 | `test_lyrics_parse.py`, `test_lyrics_status.py` | karnatik.com parsing; status table |
 | `test_translit.py` | ISO-15919 spelling, phones, syllable fitting, notation lines |
+| `test_export_ir.py` | swara naming, svarasthana, splits, quantisation, phone track |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |
@@ -606,8 +629,7 @@ No test needs a GPU or a model download.
 - **Tonic.** Recordings flagged `tonic_ambiguous` need a listen.
 
 **Next steps**
-1. Step 8: an ICM-IR exporter, and SoulX-Singer clips (2–16 s, 50 fps F0, `in_` phones
-   via an ISO-15919 G2P path).
+1. Step 8: SoulX-Singer clips (2–16 s, 50 fps F0, `in_` phones) and the Probe-40 set.
 2. Run all 168 multitrack recordings.
 3. About 5 hand-corrected gold recordings, plus a Carnatic-Varnam onset evaluation.
 4. Phase 2: the 81 recordings without stems (mix separation), then Hindustani.

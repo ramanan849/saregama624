@@ -21,6 +21,7 @@ redoes recordings already done):
     viz               contour sheets (PDF)
     review-export     Sonic Visualiser layers + sync preview
     review-import     read corrected layers back, mark reviewed
+    export-ir         ICM-IR v0 dataset: parquet tables + 100 Hz frames
 
 Global options ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` default to
 the locations in :mod:`saregama.paths`.
@@ -797,6 +798,86 @@ def cmd_tala(a):
                   + (f", |err| < 2%: {np.mean(np.abs(v) < 0.02):.2f}" if k == "period_err" else ""), flush=True)
 
 
+def cmd_export_ir(a):
+    """``export-ir``: the ICM-IR v0 dataset (``saregama/export_ir.py``) from every
+    bundle that has F0 and swaras, into ``--out``."""
+    import numpy as np
+    import pandas as pd
+    import yaml
+    from .export_ir import (IR_SPEC, PHONES, assign_splits, frames, singer_id, swara_rows, syllable_rows)
+    from .ir import Bundle
+    out = Path(a.out)
+    (out / "frames").mkdir(parents=True, exist_ok=True)
+    recs = [r for r in _saraga_recs(a) if Bundle(a.ann_root, r.mbid).stage_done("swaras")]
+    split = assign_splits(sorted({r.concert for r in recs}), test=[c for c in a.test_concerts.split(";") if c],
+                          val=[c for c in a.val_concerts.split(";") if c])
+    rec_rows, syl_rows, sw_rows = [], [], []
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        ir = b.load()
+        sections = ir.get("sections") or ir.get("sections_auto") or []
+        tala = ir.get("tala") or {}
+        lpath = Path(a.lyrics_dir) / f"{r.work_mbid}.yaml"
+        ldoc = yaml.safe_load(lpath.read_text(encoding="utf-8")) if lpath.exists() else {}
+        verified = bool(ldoc.get("verified"))
+        by_singer = {}
+        for suffix, singer in (("", "lead"), ("_vocal-s", "second")):
+            if b.path(f"lyrics{suffix}.json").exists():
+                lyr = json.loads(b.path(f"lyrics{suffix}.json").read_text(encoding="utf-8"))
+                by_singer[singer] = syllable_rows(r.mbid, lyr, singer, tala, sections, verified)
+                syl_rows += by_singer[singer]
+        sw = json.loads(b.path("swaras.json").read_text(encoding="utf-8"))
+        sw_rows += swara_rows(r.mbid, sw, ir.get("raaga", ""), tala, sections)
+        np.savez_compressed(out / "frames" / f"{r.mbid}.npz", **frames(b, by_singer))
+        leads = [singer_id(x) for x in ir.get("lead", [])]
+        rec_rows.append({
+            "mbid": r.mbid, "title": ir["title"], "concert": r.concert, "split": split[r.concert],
+            "singer_ids": ";".join(leads), "duet": "vocal-s_clean" in ir["stems"], "raga": ir.get("raaga", ""),
+            "tala": ir.get("taala", ""), "form": ir.get("form", ""), "tonic_hz": ir["tonic_hz"],
+            "tonic_source": ir.get("tonic_source", ""), "laya_bpm": tala.get("laya_bpm"),
+            "beats_per_cycle": tala.get("beats_per_cycle"), "aksharas_per_beat": tala.get("aksharas_per_beat"),
+            "tala_source": tala.get("source", "none"), "sections_source": "manual" if ir.get("sections") else
+            ("auto" if ir.get("sections_auto") else "none"), "work_mbid": r.work_mbid,
+            "language": " ".join((ldoc.get("musicbrainz") or {}).get("languages") or []),
+            "lyrics": "verified" if verified else ("auto" if by_singer else "none"),
+            "length_s": ir["length_s"], "status": ir.get("status", "auto"), "flags": ";".join(ir.get("flags", []))})
+        print(f"[{i}/{len(recs)}] {r.title}: {sum(len(v) for v in by_singer.values())} syllables", flush=True)
+    pd.DataFrame(rec_rows).to_parquet(out / "recordings.parquet", index=False)
+    pd.DataFrame(syl_rows).to_parquet(out / "syllables.parquet", index=False)
+    pd.DataFrame(sw_rows).to_parquet(out / "swaras.parquet", index=False)
+    (out / "phones.json").write_text(json.dumps([p.name for p in PHONES], indent=0), encoding="utf-8")
+    (out / "splits.json").write_text(json.dumps(split, indent=1, ensure_ascii=False), encoding="utf-8")
+    (out / "DATASHEET.md").write_text(_datasheet(IR_SPEC, rec_rows, syl_rows, sw_rows), encoding="utf-8")
+    print(f"{len(rec_rows)} recordings, {len(syl_rows)} syllables, {len(sw_rows)} swara segments -> {out}")
+
+
+def _datasheet(spec: str, recs: list, syls: list, sws: list) -> str:
+    """Text of the export's ``DATASHEET.md``: provenance, licence, contents, QC."""
+    from collections import Counter
+    hours = lambda rows: round(sum(r["length_s"] for r in rows) / 3600, 2)
+    by_split = {s: [r for r in recs if r["split"] == s] for s in ("train", "val", "test")}
+    lyr = Counter(r["lyrics"] for r in recs)
+    return f"""# Saraga Carnatic, {spec}
+
+Built by saregama624 (https://github.com/ramanan849/saregama624) from Saraga 1.5 Carnatic
+multitrack recordings. Source data: Saraga, CC BY-NC 4.0 (non-commercial use, attribution
+required). Lyrics come from karnatik.com and are for internal annotation only; do not
+redistribute them.
+
+| | Recordings | Hours |
+|---|---|---|
+| all | {len(recs)} | {hours(recs)} |
+""" + "".join(f"| {s} | {len(v)} | {hours(v)} |\n" for s, v in by_split.items()) + f"""
+Lyrics: {dict(lyr)}. Syllables: {len(syls)}. Swara segments: {len(sws)}.
+
+All times are seconds on the mix clock; frame k is at k / 100 s. Pitch is in cents re the
+tonic (10-cent steps in `frames/*.npz`). Splits are by concert (`splits.json`). Read `flags`
+and `lyrics` in `recordings.parquet` before training: `lyrics_unverified` alignments were
+made against lyrics no person has confirmed, and `low_conf` syllables matched few letters.
+See the saregama624 README for the methods and their measured accuracy.
+"""
+
+
 def cmd_review_export(a):
     """``review-export``: Sonic Visualiser layers, sync preview and README into
     each bundle's ``review/``.
@@ -1014,6 +1095,13 @@ def main(argv=None):
     s.add_argument("--evaluate", action="store_true", help="score estimation on recordings with manual samas")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_tala, stems_only=True)
+
+    s = sub.add_parser("export-ir", help="ICM-IR v0 dataset (parquet + 100 Hz frames) from the bundles")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "export" / "icm_ir_v0"))
+    s.add_argument("--test-concerts", default="", help="';'-separated concert names forced into test")
+    s.add_argument("--val-concerts", default="", help="';'-separated concert names forced into val")
+    s.set_defaults(fn=cmd_export_ir, stems_only=True)
 
     s = sub.add_parser("align", help="line-loop CTC alignment of the (selected) lyrics")
     s.add_argument("--mbids", default="")
