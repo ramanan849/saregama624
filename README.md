@@ -118,11 +118,18 @@ $S swaras          --mbids $P                 #    swara segments + flat contour
 $S lyrics-fetch    --mbids $P                 # 5  candidate lyrics per composition (web)
 $S lyrics-verify   --work <work_mbid>         #    show candidates / record a choice
 $S lyrics-status                              #    rebuild lyrics/status.tsv (offline)
-$S align           --mbids $P                 # 6  time-aligned lyrics                GPU once
+$S emissions       --mbids $P                 #    cache MMS emissions per voice      GPU
+$S sections-train                             #    evaluate + train the section model
+$S sections        --mbids $P                 #    automatic sections where Saraga has none
+$S tala            --mbids $P                 #    beat grid, laya, sama (--evaluate to score)
+$S align           --mbids $P                 # 6  time-aligned lyrics
 $S viz             --mbids $P                 #    review/contour.pdf
 $S review-export   --mbids $P                 # 7  Sonic Visualiser layers + sync preview
 $S review-import   --mbids <id> --reviewer <name>
 ```
+
+`scripts/run_stages.sh <mbids-file> <gpu> [stage ...]` runs stages in order over a
+list (default: `sync stems f0 emissions`, which need neither lyrics nor sections).
 
 Long runs go in a tmux window or under `nohup`, with output teed to
 `annotations/logs/`. Use `CUDA_VISIBLE_DEVICES` to choose GPUs.
@@ -230,6 +237,53 @@ saved for flat→expressive gamaka modelling.
 
 See [Lyrics](#lyrics).
 
+### Sections — `stages/sections.py`
+
+Only 46 of the 168 multitrack recordings have Saraga's manual sections, and the
+aligner needs them. `sections` labels every second of a recording as one of five
+classes:
+
+| Class | What is happening | Region label |
+|---|---|---|
+| vocal alapana | voice, no percussion (alapana, sloka) | `Vocal ālāp` |
+| violin alapana | violin alone | `Violin ālāp` |
+| kriti | voice + percussion (composition, neraval) | `Kriti` (all lines allowed) |
+| svara | voice + percussion singing sargam | `Kalpanā svara` |
+| tani | percussion solo | `Tani āvartana` |
+
+- **Features, per second:** stem levels (vocal, violin, percussion) relative to their
+  loud level, percussion onset rate, voicing of each singer, the MMS letter-spike rate
+  and its consonant / sargam-consonant shares, and swara movement. Each is also
+  averaged over ±2 s and ±10 s.
+- **Model:** gradient boosting trained on the labelled recordings
+  (`sections-train`, which first reports leave-one-concert-out accuracy against a
+  rules baseline), then Viterbi smoothing with a switching cost and a 15 s minimum
+  region.
+- **Output:** `ir.json['sections_auto']`. Manual sections always take precedence;
+  `align` and `review-export` use `sections`, falling back to `sections_auto`. The
+  model is saved to `annotations/models/sections.pkl`.
+
+### Tala — `stages/tala.py`
+
+ICM-IR needs the laya and a matra index / sam flag on every syllable and swara.
+Saraga annotates sama for 63 recordings and tempo for 60. Its tempo file is
+`apm, bpm, cycle_s, aksharas_per_cycle, aksharas_per_beat`, which I checked against
+the sama annotations; Ādi, for example, is `…, 32, 4`, i.e. 8 beats of 4 aksharas.
+
+- **With annotated samas:** beats are subdivided evenly between consecutive samas.
+- **Without:** the grid is estimated from the clean percussion stems.
+  1. Spectral-flux onset strength at exactly 100 fps (audio at 16 kHz, hop 160).
+  2. The beat period is the autocorrelation peak, weighted by a log-normal tempo prior
+     at 95 bpm (against tempo-octave errors) and refined to sub-frame precision on
+     the cycle-lag peak.
+  3. Beats come from dynamic-programming tracking.
+  4. Sama is the beat phase with the strongest bass-head (`mridangam-left`) strokes;
+     `phase_conf` is its margin over the runner-up.
+- **Output:** `ir.json['tala']` with `source`, `laya_bpm`, `beats_per_cycle`,
+  `aksharas_per_beat`, `beats`, `beat_index` (0 = sama), `samas` and `phase_conf`.
+- **Evaluation:** `tala --evaluate` scores the estimator against the annotated
+  recordings (beat F-measure, sama hit rate within 70 ms, period error).
+
 ### 6. `align` — `stages/align_spikes.py` (default), `stages/align_kriti.py`
 
 A kriti isn't sung as written:
@@ -285,6 +339,7 @@ of every 100 Hz array is at t = k / 100 s.
 | `f0_100hz_vocal-s.npz` | the same for the second singer (duos) |
 | `flat_100hz.npz` | `fps`, `flat_cents` |
 | `swaras.json` | `raga`, `raga_swaras`, `positions_cents`, `summary`, `segments[]` |
+| `sections_feat.npz` | cached per-second section features (`x`, `names`) |
 | `lyrics.json` | `source`, `lines[]`, `instances[]`, `regions[]` |
 | `lyrics_vocal-s.json` | the same for the second singer (duets) |
 | `mms_50hz.npz`, `mms_50hz_vocal-s.npz` | `logp`: cached MMS_FA log-probabilities (float16) |
@@ -305,7 +360,9 @@ of every 100 Hz array is at t = k / 100 s.
   tonic.
 
 **Structure**
-- `sections[]` as `{start, end, label}`, and `sama[]`.
+- `sections[]` as `{start, end, label}` (Saraga's manual sections), `sections_auto[]`
+  (the `sections` stage: adds `class`), and `sama[]`.
+- `tala`: see [Tala](#tala--stagestalapy).
 
 **Stems**
 - `stems.<name>`:
@@ -475,6 +532,8 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/stages/swaras.py` | raga table, swara segmentation, flat contour |
 | `saregama/viz.py` | contour sheets (PDF) |
 | `saregama/lyrics_fetch.py` | MusicBrainz + karnatik.com lyric candidates |
+| `saregama/stages/sections.py` | automatic sections (features, classifier, smoothing) |
+| `saregama/stages/tala.py` | beat grid, laya, sama (from annotations or estimated) |
 | `saregama/stages/align_spikes.py` | default lyric aligner (spike DP) |
 | `saregama/stages/align_kriti.py` | text, line graph, section rules, MMS emitter, trellis engine |
 | `saregama/review_sv.py` | Sonic Visualiser export / import, sync preview |
@@ -514,6 +573,9 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_sync.py` | a known stem shift is recovered and undone |
 | `test_align_kriti.py` | syllabification; line-loop order (repeats, returns); resuming a held line |
 | `test_review_sv.py` | Sonic Visualiser layers round-trip and re-nest by containment |
+| `test_sections.py` | label mapping, smoothing, region merging, rules baseline |
+| `test_tala.py` | tala shapes, grids from samas, matra lookup, metrics, estimation on a synthetic track |
+| `test_lyrics_parse.py`, `test_lyrics_status.py` | karnatik.com parsing; status table |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |

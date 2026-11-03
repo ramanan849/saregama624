@@ -10,10 +10,14 @@ redoes recordings already done):
     f0                100 Hz F0 ensemble, tonic, Saraga QC              (GPU)
     tonic-consensus   one Sa per concert
     swaras            swara segments and flat contour
+    sections-train    evaluate + train the automatic section classifier
+    sections          automatic sections where Saraga has none
+    tala              beat grid, laya and sama (estimated where not annotated)
     lyrics-fetch      candidate lyrics per composition (web)
     lyrics-status     rebuild lyrics/status.tsv from the YAMLs (offline)
     lyrics-verify     show candidates / record the right lyrics
-    align             time-aligned lyrics (MMS_FA spikes)               (GPU once, cached)
+    emissions         cache MMS_FA emissions per vocal stem             (GPU)
+    align             time-aligned lyrics (MMS_FA spikes; uses the cache)
     viz               contour sheets (PDF)
     review-export     Sonic Visualiser layers + sync preview
     review-import     read corrected layers back, mark reviewed
@@ -495,6 +499,46 @@ def cmd_lyrics_verify(a):
 VOICES = (("vocal_clean", "", "lead"), ("vocal-s_clean", "_vocal-s", "second"))
 
 
+def _mms_emissions(b, ir: dict, stem: str, suffix: str, em=None):
+    """MMS_FA log-probabilities (50 fps) of one cleaned vocal stem, from the
+    ``mms_50hz<suffix>.npz`` cache, computed with emitter ``em`` and cached if
+    absent."""
+    import numpy as np
+    import soundfile as sf
+    from .audio import resample
+    path = b.path(f"mms_50hz{suffix}.npz")
+    if path.exists():
+        return np.load(path)["logp"].astype(np.float32)
+    x, sr = sf.read(str(b.dir / ir["stems"][stem]["path"]), dtype="float32")
+    logp = em(resample(x, sr, 16000))
+    np.savez_compressed(path, logp=logp.astype(np.float16))
+    return logp
+
+
+def cmd_emissions(a):
+    """``emissions``: cache MMS_FA log-probabilities of every cleaned vocal stem
+    (``mms_50hz[_vocal-s].npz``).  ``align`` and ``sections`` read the cache, so
+    this GPU step can run ahead of lyrics and sections."""
+    from .ir import Bundle
+    from .stages.align_kriti import AlignCfgK, MmsEmitter
+    em = None
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("stems"):
+            continue
+        ir = b.load()
+        done = []
+        for stem, suffix, _ in VOICES:
+            if stem not in ir["stems"] or b.path(f"mms_50hz{suffix}.npz").exists():
+                continue
+            em = em or MmsEmitter(AlignCfgK(device=a.device))
+            _mms_emissions(b, ir, stem, suffix, em)
+            done.append(stem)
+        if done:
+            print(f"[{i}/{len(recs)}] {r.title}: {', '.join(done)}", flush=True)
+
+
 def cmd_align(a):
     """``align``: time-align the selected lyrics of each recording.
 
@@ -508,10 +552,8 @@ def cmd_align(a):
     re-aligned.
     """
     import numpy as np
-    import soundfile as sf
     import torchaudio
     import yaml
-    from .audio import resample
     from .ir import Bundle
     from .stages.align_kriti import (AlignCfgK, MmsEmitter, align_regions, extend_sustain, lyric_lines,
                                      mark_overlap, to_json)
@@ -543,15 +585,10 @@ def cmd_align(a):
                   for v in voices if b.path(f"f0_100hz{v[1]}.npz").exists()}
         summaries = {}
         for stem, suffix, singer in voices:
-            emit_path = b.path(f"mms_50hz{suffix}.npz")
-            if emit_path.exists():
-                logp = np.load(emit_path)["logp"].astype(np.float32)
-            else:
-                em = em or MmsEmitter(cfg)
-                x, sr = sf.read(str(b.dir / ir["stems"][stem]["path"]), dtype="float32")
-                logp = em(resample(x, sr, 16000))
-                np.savez_compressed(emit_path, logp=logp.astype(np.float16))
-            regions = ir.get("sections") or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}]
+            em = em or (None if b.path(f"mms_50hz{suffix}.npz").exists() else MmsEmitter(cfg))
+            logp = _mms_emissions(b, ir, stem, suffix, em)
+            regions = (ir.get("sections") or ir.get("sections_auto")
+                       or [{"start": 0.0, "end": ir["length_s"], "label": "unknown"}])
             if a.engine == "spikes":
                 from .stages.align_spikes import SpikeCfg, align_regions_spikes
                 inst, rep = align_regions_spikes(logp, lines, regions, vocab, vocab["-"], SpikeCfg())
@@ -585,6 +622,179 @@ def cmd_align(a):
         summ = summaries["lead"]
         b.mark("align", engine=a.engine, **summ, **({"second": summaries["second"]} if "second" in summaries else {}))
         print(f"[{i}/{len(recs)}] {r.title}: {json.dumps(summaries)}", flush=True)
+
+
+def _section_features(b):
+    """Per-second section features of a bundle, cached in ``sections_feat.npz``
+    (recomputed if missing or built from an older feature set)."""
+    import numpy as np
+    from .stages.sections import FEATURE_NAMES, features
+    path = b.path("sections_feat.npz")
+    if path.exists():
+        z = np.load(path)
+        if list(z["names"]) == list(FEATURE_NAMES):
+            return z["x"]
+    x = features(b)
+    np.savez_compressed(path, x=x, names=np.array(FEATURE_NAMES))
+    return x
+
+
+def _section_ready(b) -> bool:
+    """True when a bundle has every input the section features need."""
+    return b.stage_done("f0") and b.stage_done("swaras") and b.path("mms_50hz.npz").exists()
+
+
+def cmd_sections_train(a):
+    """``sections-train``: leave-one-concert-out evaluation of the section
+    classifier (rules baseline, model, model + smoothing) on recordings with
+    manual sections, then a final model trained on all of them, saved to
+    ``--model``."""
+    import pickle
+    from collections import defaultdict
+    import numpy as np
+    from .ir import Bundle
+    from .stages.sections import (CLASSES, frame_accuracy, frame_labels, proba, rules, train,
+                                  viterbi_smooth)
+    data = []
+    for r in _saraga_recs(a):
+        b = Bundle(a.ann_root, r.mbid)
+        if not r.sections() or not _section_ready(b):
+            continue
+        x = _section_features(b)
+        data.append((r.concert, r.title, x, frame_labels(r.sections(), len(x))))
+    concerts = sorted({d[0] for d in data})
+    print(f"{len(data)} labelled recordings from {len(concerts)} concerts", flush=True)
+    tot = defaultdict(lambda: [0, 0])
+    confusion = np.zeros((len(CLASSES), len(CLASSES)), dtype=np.int64)
+    for c in concerts:
+        clf = train([d[2] for d in data if d[0] != c], [d[3] for d in data if d[0] != c])
+        for _, title, x, y in (d for d in data if d[0] == c):
+            m = y >= 0
+            preds = {"rules": rules(x), "model": proba(clf, x).argmax(1),
+                     "model+smooth": viterbi_smooth(proba(clf, x), a.switch_cost)}
+            for k, pr in preds.items():
+                tot[k][0] += int((pr[m] == y[m]).sum())
+                tot[k][1] += int(m.sum())
+            np.add.at(confusion, (y[m], preds["model+smooth"][m]), 1)
+            acc, rec = frame_accuracy(preds["model+smooth"], y)
+            print(f"  [{c[:24]}] {title[:28]:28s} acc {acc:.2f} {rec}", flush=True)
+    for k, (h, n) in tot.items():
+        print(f"leave-one-concert-out frame accuracy, {k}: {h / max(n, 1):.3f} ({n} labelled s)", flush=True)
+    print("confusion (rows = truth, cols = predicted, model+smooth):", list(CLASSES), flush=True)
+    for k, row in enumerate(confusion):
+        print(f"  {CLASSES[k]:15s} {row.tolist()}", flush=True)
+    final = train([d[2] for d in data], [d[3] for d in data])
+    Path(a.model).parent.mkdir(parents=True, exist_ok=True)
+    with open(a.model, "wb") as fh:
+        pickle.dump({"model": final, "switch_cost": a.switch_cost, "trained_on": [d[1] for d in data]}, fh)
+    print(f"model -> {a.model}", flush=True)
+
+
+def cmd_sections(a):
+    """``sections``: automatic sections (``ir['sections_auto']``) for every
+    recording with the needed inputs, using the model from ``sections-train``.
+    Manual Saraga sections are kept as they are and still take precedence."""
+    import pickle
+    from .ir import Bundle
+    from .stages.sections import proba, to_regions, viterbi_smooth
+    with open(a.model, "rb") as fh:
+        m = pickle.load(fh)
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not _section_ready(b) or (b.stage_done("sections") and not a.force):
+            continue
+        x = _section_features(b)
+        ir = b.load()
+        regions = to_regions(viterbi_smooth(proba(m["model"], x), m["switch_cost"]), a.min_region_s,
+                             ir.get("length_s"))
+        ir["sections_auto"] = regions
+        b.save(ir)
+        b.mark("sections", n=len(regions), manual=bool(ir.get("sections")))
+        print(f"[{i}/{len(recs)}] {r.title}: " + " | ".join(f"{x['label']} {x['start']:.0f}-{x['end']:.0f}"
+                                                            for x in regions), flush=True)
+
+
+def _percussion(b, ir, sr: int = 16000):
+    """(all percussion, bass head) mono audio of a bundle at ``sr``: mridangam
+    (+ ghatam when present), and the mridangam's left (bass, thoppi) head."""
+    from .audio import load_audio
+    st = ir["stems"]
+    perc = load_audio(b.dir / st["mridangam"]["path"], sr)
+    if "ghatam" in st:
+        g = load_audio(b.dir / st["ghatam"]["path"], sr)
+        perc = perc[:len(g)] + g[:len(perc)]
+    bass = load_audio(b.dir / st["mridangam-left"]["path"], sr) if "mridangam-left" in st else perc
+    return perc, bass, sr
+
+
+def cmd_tala(a):
+    """``tala``: beat grid, laya and sama per recording (``ir['tala']``).
+
+    Annotated samas give the grid directly (beats subdivided evenly); otherwise
+    the grid is estimated from the percussion stems.  With ``--evaluate``, the
+    estimator also runs on recordings *with* annotated samas and is scored
+    against them (beat F-measure and sama hit rate within 70 ms, beat period
+    error); nothing is written in that mode."""
+    import numpy as np
+    from .ir import Bundle
+    from .stages.tala import (beat_f_measure, estimate_grid, grid_from_samas, load_tempo, sama_hit_rate,
+                              tala_shape)
+    rows = []
+    recs = _saraga_recs(a)
+    for i, r in enumerate(recs, 1):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("sync"):
+            continue
+        tempo = load_tempo(r.ann["tempo-manual"]) if "tempo-manual" in r.ann else None
+        shape = tala_shape(r.taala, tempo)
+        samas = r.sama()
+        if a.evaluate:
+            if shape is None or len(samas) < 4:
+                continue
+            ref_beats, _ = grid_from_samas(samas, shape[0])
+            ir = b.load()
+            perc, bass, sr = _percussion(b, ir)
+            beats, index, period, conf = estimate_grid(perc, bass, sr, shape[0])
+            span = (beats >= samas[0] - 1) & (beats <= samas[-1] + 1)     # where the reference exists
+            ref_period = float(np.median(np.diff(samas))) / shape[0]
+            row = {"title": r.title[:24], "beats_per_cycle": shape[0],
+                   "period_err": round(period / ref_period - 1, 3),
+                   "beat_f": round(beat_f_measure(beats[span], ref_beats), 3),
+                   "sama_hit": round(sama_hit_rate(beats[span][index[span] == 0], samas), 3),
+                   "phase_conf": round(conf, 3)}
+            rows.append(row)
+            print(f"[{i}/{len(recs)}] {json.dumps(row, ensure_ascii=False)}", flush=True)
+            continue
+        if b.stage_done("tala") and not a.force:
+            continue
+        ir = b.load()
+        if shape is None:
+            ir["tala"] = {"source": "unknown", "note": f"no tala shape for {r.taala!r}"}
+            b.save(ir)
+            b.mark("tala", source="unknown")
+            continue
+        if len(samas) >= 2:
+            beats, index = grid_from_samas(samas, shape[0])
+            source, conf = "manual_sama", 1.0
+            period = float(np.median(np.diff(samas))) / shape[0]
+        else:
+            perc, bass, sr = _percussion(b, ir)
+            beats, index, period, conf = estimate_grid(perc, bass, sr, shape[0])
+            source = "estimated"
+        ir["tala"] = {"source": source, "phase_conf": round(conf, 3), "beats_per_cycle": shape[0],
+                      "aksharas_per_beat": shape[1], "laya_bpm": round(60.0 / period, 2),
+                      "beats": np.round(beats, 3).tolist(), "beat_index": index.tolist(),
+                      "samas": np.round(beats[index == 0], 3).tolist()}
+        b.save(ir)
+        b.mark("tala", source=source, laya_bpm=ir["tala"]["laya_bpm"], phase_conf=round(conf, 3))
+        print(f"[{i}/{len(recs)}] {r.title}: {source} {ir['tala']['laya_bpm']} bpm, "
+              f"{shape[0]} beats/cycle, phase_conf {conf:.2f}", flush=True)
+    if a.evaluate and rows:
+        for k in ("period_err", "beat_f", "sama_hit"):
+            v = np.array([x[k] for x in rows])
+            print(f"{k}: median {np.median(v):.3f}, mean {np.mean(v):.3f}"
+                  + (f", |err| < 2%: {np.mean(np.abs(v) < 0.02):.2f}" if k == "period_err" else ""), flush=True)
 
 
 def cmd_review_export(a):
@@ -780,6 +990,30 @@ def main(argv=None):
     s.add_argument("--reviewer", default="")
     s.add_argument("--notes", default="")
     s.set_defaults(fn=cmd_lyrics_verify)
+
+    s = sub.add_parser("emissions", help="cache MMS_FA emissions of every cleaned vocal stem (GPU)")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--device", default="cuda")
+    s.set_defaults(fn=cmd_emissions, stems_only=True)
+
+    s = sub.add_parser("sections-train", help="evaluate (leave-one-concert-out) and train the section classifier")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--model", default=str(ANN_ROOT.parent / "models" / "sections.pkl"))
+    s.add_argument("--switch-cost", type=float, default=8.0, help="Viterbi cost of a section change")
+    s.set_defaults(fn=cmd_sections_train, stems_only=True)
+
+    s = sub.add_parser("sections", help="automatic sections (ir.json sections_auto) where Saraga has none")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--model", default=str(ANN_ROOT.parent / "models" / "sections.pkl"))
+    s.add_argument("--min-region-s", type=float, default=15.0)
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_sections, stems_only=True)
+
+    s = sub.add_parser("tala", help="beat grid, laya and sama (ir.json tala); --evaluate scores the estimator")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--evaluate", action="store_true", help="score estimation on recordings with manual samas")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_tala, stems_only=True)
 
     s = sub.add_parser("align", help="line-loop CTC alignment of the (selected) lyrics")
     s.add_argument("--mbids", default="")

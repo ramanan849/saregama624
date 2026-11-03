@@ -158,7 +158,7 @@ def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
 
     put("sections", _svl("regions", "sections",
                          [{"start": s["start"], "end": s["end"], "value": 0.0, "label": s["label"]}
-                          for s in ir.get("sections", [])], end_s, "#52514e"))
+                          for s in (ir.get("sections") or ir.get("sections_auto") or [])], end_s, "#52514e"))
     put("sama", _svl("timeinstants", "sama", [{"start": float(x), "label": "sama"}
                                                for x in ir.get("sama", [])], end_s, "#0b0b0b"))
     if preview:
