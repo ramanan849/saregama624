@@ -282,6 +282,41 @@ AUTO_SCORE = 0.9             # combined match score needed for auto-selection ..
 AUTO_RAGA = 0.85             # ... and raga similarity (same title, other raga = other song)
 
 
+STATUS_HEADER = ["work_mbid", "title", "raga", "composer", "language", "status", "source",
+                 "best_title", "best_raga", "score", "url"]
+
+
+def work_status(doc: dict) -> str:
+    """``verified`` (a person confirmed it), ``auto`` (pre-selected, unconfirmed)
+    or ``missing`` (no usable lyrics yet)."""
+    if doc.get("verified"):
+        return "verified"
+    return "auto" if doc.get("selected") else "missing"
+
+
+def write_status(lyrics_dir: Path) -> Dict[str, int]:
+    """Rebuild ``<lyrics_dir>/status.tsv`` from *every* work YAML in the folder
+    (not just the works a run touched, so a partial ``lyrics-fetch`` never
+    shrinks the table).  Returns the count per status."""
+    lyrics_dir = Path(lyrics_dir)
+    rows, counts = [], {}
+    for path in sorted(lyrics_dir.glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        mb = doc.get("musicbrainz") or {}
+        best = (doc.get("candidates") or [{}])[0]
+        status = work_status(doc)
+        counts[status] = counts.get(status, 0) + 1
+        rows.append([doc.get("work_mbid", path.stem), doc.get("title", ""), doc.get("raga", ""),
+                     "; ".join(mb.get("composer") or []), " ".join(mb.get("languages") or []), status,
+                     doc.get("source") or "", best.get("title", ""), best.get("raga", ""),
+                     best.get("score", ""), best.get("url", "")])
+    with open(lyrics_dir / "status.tsv", "w", encoding="utf-8") as fh:
+        fh.write("\t".join(STATUS_HEADER) + "\n")
+        for row in rows:
+            fh.write("\t".join(str(x).replace("\t", " ") for x in row) + "\n")
+    return counts
+
+
 def auto_select(doc: dict) -> dict:
     """Pre-select a candidate whose title and raga match well; it still needs a
     human ``verified: true``."""

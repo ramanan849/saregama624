@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import soundfile as sf
 
-from ..audio import load_audio
+from ..audio import load_audio, resample
+
+Audio = Union[Path, str, np.ndarray]      # a file, or mono samples already decoded at ``in_sr``
 
 SYNC_SR = 16000          # analysis rate; lag resolution 62.5 us
 # The stems come from one multitrack recorder and are mutually synchronous, so
@@ -103,17 +105,27 @@ def stem_lag(stem: np.ndarray, mix: np.ndarray, sr: int = SYNC_SR, win_s: float 
     return StemLag(float(np.median(lags)), iqr, len(rows), drift, False)
 
 
-def estimate_offsets(mix_path: Path, stem_paths: Dict[str, Path], tight_ms: float = 0.5,
-                     agree_ms: float = 0.5) -> SyncResult:
+def _at(x: Audio, sr: int, in_sr: int = WRITE_SR) -> np.ndarray:
+    """Mono samples at ``sr``: decode a file (``load_audio`` decodes at the file's
+    rate and resamples), or resample decoded samples given at ``in_sr`` the same
+    way, so both routes give identical arrays."""
+    if isinstance(x, np.ndarray):
+        return resample(x, in_sr, sr)
+    return load_audio(x, sr)
+
+
+def estimate_offsets(mix_path: Audio, stem_paths: Dict[str, Audio], tight_ms: float = 0.5,
+                     agree_ms: float = 0.5, in_sr: int = WRITE_SR) -> SyncResult:
     """One offset for all stems of a recording.
 
     Each stem is measured with ``stem_lag``; the offset is the median lag of the
     tight melodic stems (``REFERENCE_STEMS``), else of any tight stem, else of
     vocal/violin as they are (flagged).  ``agree_ms`` is the spread allowed
-    between the consensus stems before a disagreement flag is raised.
+    between the consensus stems before a disagreement flag is raised.  Inputs
+    are paths or arrays decoded at ``in_sr``.
     """
-    mix = load_audio(mix_path, SYNC_SR)
-    lags = {k: stem_lag(load_audio(p, SYNC_SR), mix) for k, p in stem_paths.items()}
+    mix = _at(mix_path, SYNC_SR, in_sr)
+    lags = {k: stem_lag(_at(p, SYNC_SR, in_sr), mix) for k, p in stem_paths.items()}
     for v in lags.values():
         v.tight = v.n_windows >= 3 and v.iqr_ms <= tight_ms
     tight = [k for k, v in lags.items() if v.tight and k in REFERENCE_STEMS]
@@ -143,15 +155,18 @@ def shift(x: np.ndarray, lag_s: float, sr: int, n_out: int) -> np.ndarray:
     return np.concatenate([y, np.zeros(n_out - len(y), x.dtype)])
 
 
-def write_aligned_stems(mix_path: Path, stem_paths: Dict[str, Path], offset_s: float,
-                        out_dir: Path, sr: int = WRITE_SR) -> Dict[str, Path]:
+def write_aligned_stems(mix_path: Audio, stem_paths: Dict[str, Audio], offset_s: float,
+                        out_dir: Path, sr: int = WRITE_SR, in_sr: int = WRITE_SR,
+                        keep: Dict[str, np.ndarray] | None = None) -> Dict[str, Path]:
     """Offset-corrected mono FLAC stems with exactly the mix's length; the two
-    mridangam heads are also summed into ``mridangam``."""
+    mridangam heads are also summed into ``mridangam``.  Inputs are paths or
+    arrays decoded at ``in_sr``; if ``keep`` is a dict it receives the aligned
+    arrays (so bleed scoring need not re-read the FLACs)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    n_out = len(load_audio(mix_path, sr))
-    out, cache = {}, {}
+    n_out = len(_at(mix_path, sr, in_sr))
+    out, cache = {}, ({} if keep is None else keep)
     for k, p in stem_paths.items():
-        y = shift(load_audio(p, sr), offset_s, sr, n_out)
+        y = shift(_at(p, sr, in_sr), offset_s, sr, n_out)
         cache[k] = y
         out[k] = out_dir / f"{k}.flac"
         sf.write(out[k], y, sr, subtype="PCM_16")
@@ -163,18 +178,38 @@ def write_aligned_stems(mix_path: Path, stem_paths: Dict[str, Path], offset_s: f
     return out
 
 
-def bleed_scores(stems: Dict[str, Path], sr: int = 4000, hop_s: float = 0.05) -> Dict[str, Dict[str, float]]:
+def bleed_scores(stems: Dict[str, Audio], sr: int = 4000, hop_s: float = 0.05,
+                 in_sr: int = WRITE_SR) -> Dict[str, Dict[str, float]]:
     """Correlation of each stem's log-energy envelope with every other stem's.
-    High values between a stem and another source's stem indicate bleed."""
+    High values between a stem and another source's stem indicate bleed.
+    Inputs are paths or arrays decoded at ``in_sr``."""
     env = {}
     hop = int(hop_s * sr)
     for k, p in stems.items():
         if k == "mridangam":
             continue
-        x = load_audio(p, sr)
+        x = _at(p, sr, in_sr)
         n = len(x) // hop
         e = np.log(np.mean(x[:n * hop].reshape(n, hop) ** 2, axis=1) + 1e-8)
         env[k] = (e - e.mean()) / (e.std() + 1e-9)        # z-scored, so the mean product is a correlation
     n = min(len(e) for e in env.values())
     return {a: {b: round(float(np.mean(env[a][:n] * env[b][:n])), 3) for b in env if b != a}
             for a in env}
+
+
+def sync_recording(mix_path: Path, stem_paths: Dict[str, Path], out_dir: Path
+                   ) -> Tuple[SyncResult, Dict[str, Path], Dict[str, Dict[str, float]]]:
+    """The whole ``sync`` stage for one recording with a single decode per file.
+
+    The mix and every stem are decoded once at ``WRITE_SR``; the 16 kHz copies
+    for GCC-PHAT and the 4 kHz copies for bleed scoring are resampled in memory,
+    and bleed is scored on the aligned arrays rather than re-read FLACs.
+    Returns (sync result, written stem paths, bleed scores).
+    """
+    mix = load_audio(mix_path, WRITE_SR)
+    stems = {k: load_audio(p, WRITE_SR) for k, p in stem_paths.items()}
+    res = estimate_offsets(mix, stems, in_sr=WRITE_SR)
+    aligned: Dict[str, np.ndarray] = {}
+    paths = write_aligned_stems(mix, stems, res.offset_s, out_dir, keep=aligned)
+    del stems
+    return res, paths, bleed_scores(aligned)

@@ -117,6 +117,7 @@ $S tonic-consensus --mbids $P                 #    one Sa per concert (--dry-run
 $S swaras          --mbids $P                 #    swara segments + flat contour
 $S lyrics-fetch    --mbids $P                 # 5  candidate lyrics per composition (web)
 $S lyrics-verify   --work <work_mbid>         #    show candidates / record a choice
+$S lyrics-status                              #    rebuild lyrics/status.tsv (offline)
 $S align           --mbids $P                 # 6  time-aligned lyrics                GPU once
 $S viz             --mbids $P                 #    review/contour.pdf
 $S review-export   --mbids $P                 # 7  Sonic Visualiser layers + sync preview
@@ -127,7 +128,8 @@ Long runs go in a tmux window or under `nohup`, with output teed to
 `annotations/logs/`. Use `CUDA_VISIBLE_DEVICES` to choose GPUs.
 
 Where the time goes:
-- `sync` decodes every mp3 and is the slowest CPU stage.
+- `sync` decodes each mp3 once (about 0.03× real time: a 5-minute recording takes
+  about 7 s).
 - `stems` and `f0` are the GPU stages.
 - `align` runs MMS once per recording; re-aligning from the cache takes about 0.1 s.
 - `review-export` mostly writes the preview FLAC (`--no-preview` skips it).
@@ -153,7 +155,8 @@ Walks `saraga1.5_carnatic/<concert>/<recording>/`.
 
 The stems and the mix are separate mp3s whose starts differ by a few milliseconds.
 
-**Measuring the offset.**
+**Measuring the offset.** `sync_recording` decodes the mix and each stem once at
+44.1 kHz and derives the 16 kHz (GCC-PHAT) and 4 kHz (bleed) copies in memory.
 - Each stem's lag against the mix is measured with GCC-PHAT on 10 s windows every
   20 s, at 16 kHz.
 - The close-mic melodic stems (vocal, violin) agree to the sample.
@@ -368,7 +371,10 @@ and stored in `annotations/lyrics/`.
 **Files written.**
 - `<work_mbid>.yaml`: MusicBrainz info, every candidate with its scores and parsed
   sections, `selected`, `lyrics`, `verified`, `source`, `notes`.
-- `status.tsv`: `auto`, `missing` or `verified` per composition, with the best match.
+- `status.tsv`: `auto`, `missing` or `verified` per composition, with its language, source
+  and best match. It is rebuilt from every YAML after each `lyrics-fetch` and
+  `lyrics-verify`, so a run on a subset never shrinks it; `lyrics-status` rebuilds it
+  offline.
 - `_cache/`: raw pages. Requests are rate-limited (1/s per host) and sent with a
   generic User-Agent.
 
@@ -511,8 +517,6 @@ No test needs a GPU or a model download.
   - Known errors on the pilot: one false line match in Mati Matiki (around 1193 s)
     and a parse artifact in Dinamani Vamsa ("sarvasvamau").
 - **Tonic.** Recordings flagged `tonic_ambiguous` need a listen.
-- **Speed.** `sync` decodes every mp3 several times; it needs speeding up before the
-  run over all 168 recordings.
 
 **Next steps**
 1. Step 8: an ICM-IR exporter, and SoulX-Singer clips (2–16 s, 50 fps F0, `in_` phones

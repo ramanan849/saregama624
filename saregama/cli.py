@@ -11,6 +11,7 @@ redoes recordings already done):
     tonic-consensus   one Sa per concert
     swaras            swara segments and flat contour
     lyrics-fetch      candidate lyrics per composition (web)
+    lyrics-status     rebuild lyrics/status.tsv from the YAMLs (offline)
     lyrics-verify     show candidates / record the right lyrics
     align             time-aligned lyrics (MMS_FA spikes)               (GPU once, cached)
     viz               contour sheets (PDF)
@@ -281,15 +282,13 @@ def cmd_sync(a):
     bleed scores and create / update the bundle's ``ir.json``.
     """
     from .ir import init_bundle
-    from .stages.sync import bleed_scores, estimate_offsets, write_aligned_stems
+    from .stages.sync import sync_recording
     recs = _saraga_recs(a)
     for i, r in enumerate(recs, 1):
         b = init_bundle(r, a.ann_root)
         if b.stage_done("sync") and not a.force:
             continue
-        res = estimate_offsets(r.mix, r.stems)
-        paths = write_aligned_stems(r.mix, r.stems, res.offset_s, b.stems_dir)
-        bleed = bleed_scores(paths)
+        res, paths, bleed = sync_recording(r.mix, r.stems, b.stems_dir)
         ir = b.load()
         ir["sync"] = res.to_json()
         ir["stems"] = {k: {"path": str(p.relative_to(b.dir)), "source": str(r.stems.get(k, "")),
@@ -425,7 +424,7 @@ def cmd_lyrics_fetch(a):
     """``lyrics-fetch``: candidate lyrics per composition (MusicBrainz +
     karnatik.com) into ``<lyrics-dir>/<work>.yaml`` and ``status.tsv``.
     """
-    from .lyrics_fetch import Fetcher, fetch_work, karnatik_index
+    from .lyrics_fetch import Fetcher, fetch_work, karnatik_index, work_status, write_status
     out_dir = Path(a.lyrics_dir)
     f = Fetcher(out_dir / "_cache")
     index = karnatik_index(f)
@@ -433,25 +432,25 @@ def cmd_lyrics_fetch(a):
     for r in _saraga_recs(a):
         if r.work_mbid and r.work_mbid not in works:
             works[r.work_mbid] = r
-    rows = []
+    errors = 0
     for i, (wm, r) in enumerate(works.items(), 1):
         try:
             doc = fetch_work(f, index, wm, r.work_title or r.title, r.raaga, out_dir)
         except Exception as e:
+            errors += 1
             print(f"[{i}/{len(works)}] error    {r.work_title or r.title}: {e!r}", flush=True)
-            rows.append([wm, r.work_title or r.title, r.raaga, "", "error", "", "", "", ""])
             continue
         best = doc["candidates"][0] if doc["candidates"] else {}
-        status = "verified" if doc.get("verified") else ("auto" if doc.get("selected") else "missing")
-        rows.append([wm, r.work_title or r.title, r.raaga, "; ".join(doc["musicbrainz"].get("composer", [])),
-                     status, best.get("title", ""), best.get("raga", ""), best.get("score", ""), best.get("url", "")])
-        print(f"[{i}/{len(works)}] {status:8s} {r.work_title or r.title} ({r.raaga}) -> "
+        print(f"[{i}/{len(works)}] {work_status(doc):8s} {r.work_title or r.title} ({r.raaga}) -> "
               f"{best.get('title', '-')} / {best.get('raga', '-')} {best.get('score', '')}", flush=True)
-    with open(out_dir / "status.tsv", "w", encoding="utf-8") as fh:
-        fh.write("work_mbid\ttitle\traga\tcomposer\tstatus\tbest_title\tbest_raga\tscore\turl\n")
-        for row in rows:
-            fh.write("\t".join(map(str, row)) + "\n")
-    print(json.dumps(Counter(r[4] for r in rows)))
+    counts = write_status(out_dir)                   # the table always covers every work YAML
+    print(json.dumps({**counts, "fetch_errors": errors}))
+
+
+def cmd_lyrics_status(a):
+    """``lyrics-status``: rebuild ``status.tsv`` from the work YAMLs (offline)."""
+    from .lyrics_fetch import write_status
+    print(json.dumps(write_status(Path(a.lyrics_dir))))
 
 
 def cmd_lyrics_verify(a):
@@ -487,6 +486,8 @@ def cmd_lyrics_verify(a):
         doc.update(selected=c["url"], source="karnatik", lyrics=c["parsed"]["sections"])
     doc.update(verified=True, verified_by=a.reviewer, notes=a.notes or doc.get("notes", ""))
     path.write_text(yaml.safe_dump(doc, allow_unicode=True, sort_keys=False, width=120), encoding="utf-8")
+    from .lyrics_fetch import write_status
+    write_status(path.parent)                         # keep status.tsv in step with the YAMLs
     print(f"verified {doc['title']} <- {doc['selected']}")
 
 
@@ -745,6 +746,9 @@ def main(argv=None):
     s = sub.add_parser("lyrics-fetch", help="candidate lyrics per Saraga work (MusicBrainz + karnatik.com)")
     s.add_argument("--mbids", default="")
     s.set_defaults(fn=cmd_lyrics_fetch, stems_only=True)
+
+    s = sub.add_parser("lyrics-status", help="rebuild <lyrics-dir>/status.tsv from every work YAML (offline)")
+    s.set_defaults(fn=cmd_lyrics_status)
 
     s = sub.add_parser("lyrics-verify", help="show a work's lyric candidates, or record the right one")
     s.add_argument("--work", required=True, help="work mbid")
