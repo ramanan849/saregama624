@@ -26,6 +26,9 @@ PREFIX = "in_"
 
 @dataclass(frozen=True)
 class Phone:
+    """One Indic phone: ASCII name, IPA, kind, a roman hint and the SoulX
+    phones whose embeddings initialise it.
+    """
     name: str
     ipa: str
     kind: str
@@ -129,6 +132,7 @@ def note_phoneme_string(phones: Sequence[str]) -> str:
 
 
 def parse_note_phoneme_string(s: str) -> List[str]:
+    """Phone names of a SoulX note phoneme string ``in_a-b-c`` ([] for rests)."""
     if s in ("<SP>", "<AP>"):
         return []
     if not s.startswith(PREFIX):

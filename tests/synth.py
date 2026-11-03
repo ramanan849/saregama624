@@ -31,6 +31,7 @@ SCALE_P = np.array([0.26, 0.09, 0.11, 0.08, 0.2, 0.09, 0.07, 0.10])
 
 @dataclass
 class SynthSong:
+    """A synthetic song: audio, exact syllables / F0 / tonic, and its annotation."""
     audio: np.ndarray
     gold: SongAnnotation
     lines: List[str]
@@ -38,6 +39,7 @@ class SynthSong:
 
 
 def synth_song(song_id: str, lang: str, lines: List[str], tonic: float, seed: int = 0) -> SynthSong:
+    """Synthesise ``lines`` in ``lang`` around ``tonic`` with known labels."""
     rng = np.random.default_rng(seed)
     sylls_by_line = [line_to_syllables(l, lang) for l in lines]
     frames_f0: List[float] = []

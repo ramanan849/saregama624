@@ -18,6 +18,9 @@ from ..schema import NOTE_REST, SongAnnotation
 
 def song_qc(ann: SongAnnotation, cfg: QcCfg, align_info: Dict, f0_info: Dict,
             leakage_db: float | None = None) -> Tuple[Dict, List[str], str]:
+    """Metrics, flags and status (auto / flagged / rejected) of one legacy song
+    from its curves, syllables and the alignment / F0 / separation reports.
+    """
     f0 = ann.f0
     voiced = f0 > 0
     n = ann.n_frames
@@ -89,6 +92,7 @@ def review_priority(qc: Dict) -> float:
 
 
 def clip_qc(notes, f0_agree: np.ndarray, cfg: QcCfg) -> Dict:
+    """Small per-clip QC record: note counts and mean F0 agreement."""
     sung = [n for n in notes if n.type != NOTE_REST]
     return {"n_notes": len(notes), "n_sung": len(sung),
             "f0_agree": float(np.nanmean(f0_agree)) if len(f0_agree) else 0.0}

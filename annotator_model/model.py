@@ -46,14 +46,18 @@ def hz_to_bin(f0: torch.Tensor) -> torch.Tensor:
 
 
 def bin_to_hz(b: torch.Tensor) -> torch.Tensor:
+    """Centre frequency (Hz) of pitch bin(s) ``b`` (1..720; 0 = unvoiced)."""
     return torch.where(b > 0, F0_MIN * 2 ** ((b - 1) * CENTS_PER_BIN / 1200), torch.zeros_like(b))
 
 
 def _mel_fb(n_fft: int, n_mels: int, sr: int, fmin: float = 30.0, fmax: float = 8000.0) -> np.ndarray:
+    """(n_mels, n_fft // 2 + 1) triangular mel filterbank (HTK mel scale)."""
     def hz2mel(f):
+        """Hz -> mel."""
         return 2595 * np.log10(1 + f / 700)
 
     def mel2hz(m):
+        """mel -> Hz."""
         return 700 * (10 ** (m / 2595) - 1)
     mels = np.linspace(hz2mel(fmin), hz2mel(fmax), n_mels + 2)
     hz = mel2hz(mels)
@@ -66,20 +70,27 @@ def _mel_fb(n_fft: int, n_mels: int, sr: int, fmin: float = 30.0, fmax: float = 
 
 
 class LogMel(nn.Module):
+    """16 kHz waveform -> log-mel frames at 50 fps (hop 320)."""
     def __init__(self, n_mels: int = 128, n_fft: int = 1024):
+        """Register the mel filterbank and Hann window as buffers."""
         super().__init__()
         self.n_fft = n_fft
         self.register_buffer("fb", torch.from_numpy(_mel_fb(n_fft, n_mels, SR_IN)), persistent=False)
         self.register_buffer("win", torch.hann_window(n_fft), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:         # x: (B, samples)
+        """(B, samples) -> (B, frames, n_mels) log-mel."""
         S = torch.stft(x, self.n_fft, HOP_IN, window=self.win, center=True, return_complex=True)
         m = torch.matmul(self.fb, S.abs() ** 2)                    # (B, mels, T)
         return torch.log(m + 1e-6).transpose(1, 2)                 # (B, T, mels)
 
 
 class ConvModule(nn.Module):
+    """Conformer convolution module: pointwise-GLU, depthwise conv, BN, SiLU,
+    pointwise, with a residual connection.
+    """
     def __init__(self, d: int, k: int = 15, p: float = 0.1):
+        """``d`` channels, depthwise kernel ``k``, dropout ``p``."""
         super().__init__()
         self.ln = nn.LayerNorm(d)
         self.pw1 = nn.Linear(d, 2 * d)
@@ -89,13 +100,16 @@ class ConvModule(nn.Module):
         self.drop = nn.Dropout(p)
 
     def forward(self, x):
+        """(B, T, d) -> (B, T, d)."""
         y = F.glu(self.pw1(self.ln(x)), dim=-1).transpose(1, 2)
         y = F.silu(self.bn(self.dw(y))).transpose(1, 2)
         return x + self.drop(self.pw2(y))
 
 
 class ConformerBlock(nn.Module):
+    """Macaron Conformer block: half FFN, self-attention, conv module, half FFN."""
     def __init__(self, d: int, heads: int, p: float = 0.1):
+        """``d`` model width, ``heads`` attention heads, dropout ``p``."""
         super().__init__()
         self.ff1 = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, 4 * d), nn.SiLU(), nn.Dropout(p), nn.Linear(4 * d, d))
         self.ln_att = nn.LayerNorm(d)
@@ -105,6 +119,7 @@ class ConformerBlock(nn.Module):
         self.ln = nn.LayerNorm(d)
 
     def forward(self, x, pad_mask: Optional[torch.Tensor] = None):
+        """(B, T, d) -> (B, T, d); ``pad_mask`` True on padded frames."""
         x = x + 0.5 * self.ff1(x)
         h = self.ln_att(x)
         x = x + self.att(h, h, h, key_padding_mask=pad_mask, need_weights=False)[0]
@@ -114,7 +129,9 @@ class ConformerBlock(nn.Module):
 
 
 class ConformerEncoder(nn.Module):
+    """Log-mel frontend + a stack of Conformer blocks, trained from scratch."""
     def __init__(self, d: int = 256, layers: int = 8, heads: int = 4, n_mels: int = 128):
+        """Width ``d``, ``layers`` blocks, ``heads`` heads, ``n_mels`` mel bands."""
         super().__init__()
         self.mel = LogMel(n_mels)
         self.inp = nn.Sequential(nn.Linear(n_mels, d), nn.LayerNorm(d))
@@ -122,6 +139,7 @@ class ConformerEncoder(nn.Module):
         self.dim = d
 
     def forward(self, wav16: torch.Tensor, n_frames: int, pad_mask=None) -> torch.Tensor:
+        """(B, samples at 16 kHz) -> (B, n_frames, d)."""
         x = self.inp(self.mel(wav16))
         x = _fit_time(x, n_frames)
         for b in self.blocks:
@@ -130,7 +148,9 @@ class ConformerEncoder(nn.Module):
 
 
 class HFEncoder(nn.Module):
+    """A Hugging Face wav2vec2-family encoder (20 ms frames = the 50 fps grid)."""
     def __init__(self, model_id: str, freeze_feature_encoder: bool = True):
+        """Load ``model_id``; optionally freeze its convolutional feature encoder."""
         super().__init__()
         from transformers import AutoModel  # type: ignore
         self.m = AutoModel.from_pretrained(model_id)
@@ -139,12 +159,14 @@ class HFEncoder(nn.Module):
         self.dim = self.m.config.hidden_size
 
     def forward(self, wav16: torch.Tensor, n_frames: int, pad_mask=None) -> torch.Tensor:
+        """(B, samples at 16 kHz) -> (B, n_frames, hidden)."""
         x = (wav16 - wav16.mean(dim=1, keepdim=True)) / (wav16.std(dim=1, keepdim=True) + 1e-7)
         h = self.m(x).last_hidden_state
         return _fit_time(h, n_frames)
 
 
 def _fit_time(x: torch.Tensor, n: int) -> torch.Tensor:
+    """Crop or edge-pad (B, T, C) features to exactly ``n`` frames."""
     T = x.shape[1]
     if T == n:
         return x
@@ -154,7 +176,9 @@ def _fit_time(x: torch.Tensor, n: int) -> torch.Tensor:
 
 
 class Annotator(nn.Module):
+    """Encoder + four linear heads (pitch, phones, onset, ntype) at 50 fps."""
     def __init__(self, encoder: str = "conformer", d: int = 256, layers: int = 8, heads: int = 4):
+        """``encoder`` is "conformer" or "hf:<model id>"; the rest size the Conformer."""
         super().__init__()
         self.encoder_name = encoder
         if encoder == "conformer":
@@ -170,6 +194,7 @@ class Annotator(nn.Module):
         self.ntype = nn.Linear(h, 3)
 
     def forward(self, wav16: torch.Tensor, n_frames: int, pad_mask=None) -> Dict[str, torch.Tensor]:
+        """Logits of every head, each (B, n_frames, classes) (onset: (B, n_frames))."""
         z = self.enc(wav16, n_frames, pad_mask)
         return {"pitch": self.pitch(z), "phones": self.phones(z),
                 "onset": self.onset(z).squeeze(-1), "ntype": self.ntype(z)}
@@ -205,6 +230,10 @@ def pitch_targets(f0: torch.Tensor, sigma_bins: float = 2.5) -> torch.Tensor:
 
 def annotator_loss(out: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor],
                    w: Dict[str, float] | None = None) -> Dict[str, torch.Tensor]:
+    """Weighted sum of the head losses, masked to real frames and weighted per
+    clip: soft-target pitch cross-entropy, CTC over phones (normalised by
+    length), onset BCE (positives weighted 8x) and note-type cross-entropy.
+    """
     w = w or {"pitch": 1.0, "ctc": 0.5, "onset": 1.0, "ntype": 0.5}
     mask = batch["frame_mask"]                                     # (B, T) bool
     sw = batch["weight"]                                           # (B,)

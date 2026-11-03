@@ -1,4 +1,30 @@
-"""Command line: ``saregama <command> ...`` (or ``python -m saregama``)."""
+"""Command line: ``saregama <command> ...`` (or ``python -m saregama``).
+
+Saraga Carnatic pipeline, in order (each command is resumable per recording;
+``--mbids`` restricts it to a list or a file of recording ids, ``--force``
+redoes recordings already done):
+
+    manifest          index Saraga recordings -> <ann-root>/manifest.csv
+    sync              stem offsets, mix-aligned FLAC stems, ir.json
+    stems             de-bleed / de-reverb the vocal stem(s)            (GPU)
+    f0                100 Hz F0 ensemble, tonic, Saraga QC              (GPU)
+    tonic-consensus   one Sa per concert
+    swaras            swara segments and flat contour
+    lyrics-fetch      candidate lyrics per composition (web)
+    lyrics-verify     show candidates / record the right lyrics
+    align             time-aligned lyrics (MMS_FA spikes)               (GPU once, cached)
+    viz               contour sheets (PDF)
+    review-export     Sonic Visualiser layers + sync preview
+    review-import     read corrected layers back, mark reviewed
+
+Global options ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` default to
+the locations in :mod:`saregama.paths`.
+
+Legacy film-song workspace (songs.csv; ported from indic-svs-annotator):
+``init``, ``run``, ``draft-lyrics``, ``export-review``, ``audit``,
+``import-review``, ``make-eval-csv``, ``evaluate``, ``export``, ``stats``,
+``phoneset``, ``g2p``.
+"""
 from __future__ import annotations
 
 import argparse
@@ -11,6 +37,7 @@ from pathlib import Path
 
 from .config import load_config
 from .ir import DEFAULT_ROOT as ANN_ROOT
+from .paths import LYRICS_DIR
 from .saraga import DEFAULT_ROOT as SARAGA_ROOT
 
 SONGS_HEADER = ["song_id", "audio", "language", "lyrics", "style", "singer_id", "gender",
@@ -18,6 +45,7 @@ SONGS_HEADER = ["song_id", "audio", "language", "lyrics", "style", "singer_id", 
 
 
 def cmd_init(a):
+    """``init``: create a legacy film-song workspace (songs.csv, lyrics/, lexicons/, config)."""
     root = Path(a.dir)
     (root / "audio").mkdir(parents=True, exist_ok=True)
     (root / "lyrics").mkdir(exist_ok=True)
@@ -40,6 +68,7 @@ def cmd_init(a):
 
 
 def _cfg(a):
+    """Load ``--config`` with ``--work-dir`` / ``--out-dir`` overrides (legacy commands)."""
     over = {}
     if getattr(a, "work_dir", None):
         over["work_dir"] = a.work_dir
@@ -49,6 +78,7 @@ def _cfg(a):
 
 
 def cmd_run(a):
+    """``run``: all legacy stages on songs.csv; prints a status count and errors."""
     from .pipeline import Pipeline, read_songs
     cfg = _cfg(a)
     songs = read_songs(a.songs)
@@ -64,6 +94,7 @@ def cmd_run(a):
 
 
 def _load_annotator(cfg):
+    """Load the trained annotator model if the config uses it, else None."""
     need = cfg.align.backend == "annotator" or "annotator" in cfg.f0.backends
     if not need:
         return None
@@ -72,6 +103,7 @@ def _load_annotator(cfg):
 
 
 def cmd_draft_lyrics(a):
+    """``draft-lyrics``: ASR draft lyric sheets for songs without lyrics (legacy)."""
     from .audio import SR, load_audio, loudness_normalize, save_audio
     from .pipeline import Pipeline, read_songs
     from .stages.lyrics import IndicConformerASR, draft_lyrics
@@ -99,6 +131,7 @@ def cmd_draft_lyrics(a):
 
 
 def cmd_export_review(a):
+    """``export-review``: Praat TextGrids for flagged (or given) legacy songs."""
     from .review import export_review
     cfg = _cfg(a)
     ids = a.songs.split(",") if a.songs else None
@@ -121,6 +154,7 @@ def cmd_audit(a):
 
 
 def cmd_import_review(a):
+    """``import-review``: read a corrected TextGrid back into a legacy song."""
     from .review import import_review
     cfg = _cfg(a)
     ann = import_review(cfg, a.song, a.textgrid, gold=a.gold, keep_notes=a.keep_notes,
@@ -156,12 +190,14 @@ def cmd_make_eval_csv(a):
 
 
 def cmd_evaluate(a):
+    """``evaluate``: compare predicted with gold legacy annotations."""
     from .evaluate import evaluate
     res = evaluate(a.pred, a.gold, a.out)
     print(json.dumps(res["summary"], indent=1))
 
 
 def cmd_export(a):
+    """``export``: build the SoulX-Singer training set from legacy song annotations."""
     from .export import export_dataset
     cfg = _cfg(a)
     inc = ("auto", "reviewed", "gold") + (("flagged",) if a.include_flagged else ())
@@ -171,6 +207,7 @@ def cmd_export(a):
 
 
 def cmd_stats(a):
+    """``stats``: sung hours by language and status, and gold progress (legacy)."""
     from .audio import FPS
     from .schema import SongAnnotation
     cfg = _cfg(a)
@@ -196,6 +233,7 @@ def cmd_stats(a):
 
 
 def cmd_phoneset(a):
+    """``phoneset``: list the Indic phones, or extend SoulX's phone_set.json."""
     from .phoneset import PHONES, embedding_init_map, extend_soulx_phoneset
     if a.soulx_phone_set:
         added = extend_soulx_phoneset(a.soulx_phone_set, a.out)
@@ -206,6 +244,7 @@ def cmd_phoneset(a):
 
 
 def cmd_g2p(a):
+    """``g2p``: print syllables and phones of one lyric line."""
     from .g2p import Lexicon, line_to_syllables
     cfg = _cfg(a)
     lex = Lexicon.load(*cfg.g2p.lexicon)
@@ -216,6 +255,10 @@ def cmd_g2p(a):
 # ----------------------------------------------------------------------------- Saraga
 
 def _saraga_recs(a):
+    """Saraga recordings selected by the common options: only those with stems
+    when the command sets ``stems_only``, filtered by ``--mbids`` (comma-separated
+    ids, or a file with one id per line).
+    """
     from .saraga import scan
     recs = [r for r in scan(a.saraga_root) if r.has_stems or not a.stems_only]
     if a.mbids:
@@ -225,6 +268,7 @@ def _saraga_recs(a):
 
 
 def cmd_manifest(a):
+    """``manifest``: index every Saraga Carnatic recording into manifest.csv."""
     from .saraga import scan, write_manifest
     recs = scan(a.saraga_root)
     out = Path(a.ann_root) / "manifest.csv"
@@ -233,6 +277,9 @@ def cmd_manifest(a):
 
 
 def cmd_sync(a):
+    """``sync``: measure the stem offset, write mix-aligned FLAC stems, compute
+    bleed scores and create / update the bundle's ``ir.json``.
+    """
     from .ir import init_bundle
     from .stages.sync import bleed_scores, estimate_offsets, write_aligned_stems
     recs = _saraga_recs(a)
@@ -255,6 +302,9 @@ def cmd_sync(a):
 
 
 def cmd_stems(a):
+    """``stems``: de-bleed and de-reverb the vocal stem(s) into ``vocal_clean``
+    (and ``vocal-s_clean`` for duos).
+    """
     from .config import SeparationCfg
     from .ir import Bundle
     from .stages.separate import Separator, clean_stem
@@ -282,6 +332,9 @@ def cmd_stems(a):
 
 
 def cmd_f0(a):
+    """``f0``: 100 Hz F0 ensemble, tonic choice and Saraga comparison; with
+    ``--qc-only`` just re-score the stored F0 against Saraga's pitch tracks.
+    """
     from .config import F0Cfg, SeparationCfg
     from .ir import F0_HZ, Bundle
     from .stages.f0 import F0Estimator
@@ -315,6 +368,9 @@ def cmd_f0(a):
 
 
 def cmd_swaras(a):
+    """``swaras``: raga-aware swara segments (``swaras.json``) and the flat
+    contour (``flat_100hz.npz``); needs ``f0``.
+    """
     import numpy as np
     from .ir import Bundle
     from .stages.swaras import flatten, segment, to_json
@@ -342,6 +398,9 @@ def cmd_swaras(a):
 
 
 def cmd_viz(a):
+    """``viz``: contour sheets ``review/contour.pdf`` (with lyric syllables when
+    ``lyrics.json`` exists); needs ``swaras``.
+    """
     from .ir import Bundle
     from .viz import contour_pdf
     recs = _saraga_recs(a)
@@ -363,6 +422,9 @@ def cmd_viz(a):
 
 
 def cmd_lyrics_fetch(a):
+    """``lyrics-fetch``: candidate lyrics per composition (MusicBrainz +
+    karnatik.com) into ``<lyrics-dir>/<work>.yaml`` and ``status.tsv``.
+    """
     from .lyrics_fetch import Fetcher, fetch_work, karnatik_index
     out_dir = Path(a.lyrics_dir)
     f = Fetcher(out_dir / "_cache")
@@ -429,6 +491,13 @@ def cmd_lyrics_verify(a):
 
 
 def cmd_align(a):
+    """``align``: time-align the selected lyrics of each recording.
+
+    MMS_FA log-probabilities of ``vocal_clean`` are cached in ``mms_50hz.npz``;
+    the spike (default) or trellis engine aligns each Saraga section; syllables
+    are extended through voicing; ``lyrics.json`` and ``ir.json['qc']['align']``
+    are written.  Reviewed recordings are never re-aligned.
+    """
     import numpy as np
     import soundfile as sf
     import yaml
@@ -496,6 +565,9 @@ def cmd_align(a):
 
 
 def cmd_review_export(a):
+    """``review-export``: Sonic Visualiser layers, sync preview and README into
+    each bundle's ``review/``.
+    """
     from .ir import Bundle
     from .review_sv import export_review
     recs = _saraga_recs(a)
@@ -508,6 +580,7 @@ def cmd_review_export(a):
 
 
 def cmd_review_import(a):
+    """``review-import``: read corrected layers back and mark the recording reviewed."""
     from .ir import Bundle
     from .review_sv import import_review
     for r in _saraga_recs(a):
@@ -535,6 +608,8 @@ def cmd_tonic_consensus(a):
         if r.tonic():
             saraga_votes[r.concert].append((r.mbid, r.tonic(), r.length_s))
     for concert, items in by_concert.items():
+        # our (raga-aware) tonics vote with double weight; Saraga's ctonic of every
+        # other recording of the concert votes once, weighted by duration
         ours = {r.mbid: (r.mbid, b.load()["tonic_hz"], 2 * r.length_s) for r, b in items}
         votes = list(ours.values()) + [v for v in saraga_votes[concert] if v[0] not in ours]
         ref = concert_consensus(votes)
@@ -560,13 +635,14 @@ def cmd_tonic_consensus(a):
 
 
 def main(argv=None):
+    """Parse the command line and run the chosen command."""
     p = argparse.ArgumentParser(prog="saregama", description=__doc__)
     p.add_argument("--config", default=None, help="TOML config (defaults if omitted)")
     p.add_argument("--work-dir", default=None)
     p.add_argument("--out-dir", default=None)
     p.add_argument("--saraga-root", default=str(SARAGA_ROOT))
     p.add_argument("--ann-root", default=str(ANN_ROOT), help="where per-recording IR bundles live")
-    p.add_argument("--lyrics-dir", default=str(ANN_ROOT.parent / "lyrics"), help="per-work lyric YAMLs")
+    p.add_argument("--lyrics-dir", default=str(LYRICS_DIR), help="per-work lyric YAMLs")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="create a workspace with templates")

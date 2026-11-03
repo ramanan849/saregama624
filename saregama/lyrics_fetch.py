@@ -11,9 +11,15 @@ For each MusicBrainz work (``work_mbid`` in the Saraga metadata):
    ``selected: null`` and ``verified: false``.  A person picks the right
    candidate (``lyrics-verify``) or pastes lyrics from another source.
 
-Works karnatik.com does not have are listed in ``missing.tsv`` for a manual
-or search-assisted lookup.  The lyrics are for internal annotation only and
-are not redistributed.
+``auto_select`` pre-selects a candidate whose title and raga match closely
+(``AUTO_SCORE``, ``AUTO_RAGA``); it is used for alignment but the recording is
+flagged ``lyrics_unverified`` until a person confirms it.  The ``lyrics-fetch``
+command writes ``status.tsv`` (auto / missing / verified per work); missing
+works need lyrics from another source via ``lyrics-verify --text``.  The
+lyrics are for internal annotation only and are not redistributed.
+
+Requests carry a generic User-Agent naming this repository (no personal
+contact details) and are rate-limited per host.
 """
 from __future__ import annotations
 
@@ -40,6 +46,9 @@ class Fetcher:
     """HTTP GET with an on-disk cache and a per-host minimum interval."""
 
     def __init__(self, cache_dir: Path, min_interval_s: float = 1.0):
+        """``cache_dir`` holds one file per URL; ``min_interval_s`` is the
+        minimum gap between two requests to the same host.
+        """
         import requests
         self.s = requests.Session()
         self.s.headers["User-Agent"] = USER_AGENT
@@ -49,6 +58,12 @@ class Fetcher:
         self.last: Dict[str, float] = {}
 
     def get(self, url: str, encoding: Optional[str] = None) -> str:
+        """Body of ``url``, from the cache if present.
+
+        Otherwise waits for the host's interval, retries up to 5 times with
+        exponential backoff on network errors and 429/5xx, and caches the text.
+        ``encoding`` forces the decoding (karnatik.com pages are latin-1).
+        """
         key = re.sub(r"[^A-Za-z0-9._-]+", "_", url)[-180:]
         path = self.cache / key
         if path.exists():
@@ -94,6 +109,10 @@ def norm(s: str) -> str:
 
 
 def sim(a: str, b: str) -> float:
+    """Similarity 0..1 of two titles after ``norm``: the better of the whole
+    string ratio and (slightly discounted) a prefix ratio, because Saraga titles
+    are often just the first words of the opening line.
+    """
     a, b = norm(a), norm(b)
     if not a or not b:
         return 0.0
@@ -104,6 +123,9 @@ def sim(a: str, b: str) -> float:
 
 
 def karnatik_index(f: Fetcher) -> List[dict]:
+    """karnatik.com's song index as [{url, title, raga, composer}], parsed
+    from the ``<OPTION>`` list on lyrics.shtml (one request, cached).
+    """
     page = f.get(KARNATIK + "lyrics.shtml", encoding="latin-1")
     out = []
     for url, label in re.findall(r'<OPTION VALUE="(c\d+\.shtml)">([^<\n]+)', page):
@@ -124,6 +146,7 @@ RAGA_ALIASES = [("sanmukhapriya", "camaram"), ("nata", "nattai"), ("harikambhoji
 
 
 def raga_sim(a: str, b: str) -> float:
+    """``sim`` for raga names, also trying the known spelling aliases."""
     best = sim(a, b)
     for x, y in RAGA_ALIASES:
         for p, q in ((x, y), (y, x)):
@@ -133,6 +156,9 @@ def raga_sim(a: str, b: str) -> float:
 
 
 def match(index: List[dict], title: str, raga: str = "", composer: str = "", k: int = 5) -> List[dict]:
+    """Top ``k`` index entries for a work, scored 0.7 title + 0.2 raga + 0.1
+    composer similarity (0.5 when a field is missing on either side).
+    """
     t0 = norm(title)[:4]
     scored = []
     for e in index:
@@ -151,6 +177,7 @@ def match(index: List[dict], title: str, raga: str = "", composer: str = "", k: 
 # ----------------------------------------------------------------------------- parsing
 
 def _text(fragment: str) -> List[str]:
+    """Visible text lines of an HTML fragment (``<br>`` = new line)."""
     fragment = re.sub(r"(?i)<br\s*/?>", "\n", fragment)
     fragment = re.sub(r"(?s)<[^>]+>", " ", fragment)
     lines = [re.sub(r"\s+", " ", html.unescape(l)).strip() for l in fragment.split("\n")]
@@ -160,6 +187,7 @@ def _text(fragment: str) -> List[str]:
 def parse_karnatik(page: str) -> dict:
     """Header fields and lyric sections of a karnatik.com song page."""
     out = {"raga": "", "tala": "", "composer": "", "language": "", "sections": []}
+    # the lyric region starts at the song header; earlier text is navigation / scripts
     i = page.find("raagam:")
     page = page[i:] if i >= 0 else page[page.find("Song:"):]
     m = re.search(r"(?is)raagam:\s*(?:<a[^>]*>)?([^<\n]+)", page)
@@ -170,14 +198,16 @@ def parse_karnatik(page: str) -> dict:
     out["composer"] = m.group(1).strip() if m else ""
     m = re.search(r"(?s)Language:\s*([^<\n]+)", page)
     out["language"] = m.group(1).strip() if m else ""
-    start = m.end() if m else 0
-    end = page.find("<hr>", start)
+    start = m.end() if m else 0          # lyrics follow the "Language:" header line ...
+    end = page.find("<hr>", start)       # ... up to the next rule (meaning, notation follow)
     body = page[start:end if end > 0 else None]
     blocks = re.split(r"(?i)<p>", body)
     sections, current = [], None
     names = {n.lower(): n for n in SECTION_NAMES}
     is_head = lambda l: (l.strip().rstrip(":").lower() in names
                          or re.fullmatch(r"(caraNam|charanam)\s*\d*:?", l.strip(), re.I) is not None)
+    # section headers ("pallavi", "caraNam 2", ...) may appear on any line, not only
+    # at the start of a <p> block
     for blk in blocks:
         for l in _text(blk):
             if is_head(l):
@@ -200,6 +230,9 @@ def parse_karnatik(page: str) -> dict:
 # ----------------------------------------------------------------------------- MusicBrainz
 
 def musicbrainz_work(f: Fetcher, mbid: str) -> dict:
+    """Title, composer, lyricist, languages, aliases, raga and tala of a
+    MusicBrainz work (one cached API request).
+    """
     data = json.loads(f.get(f"{MUSICBRAINZ}work/{mbid}?fmt=json&inc=artist-rels+aliases"))
     rel = lambda t: [r["artist"]["name"] for r in data.get("relations", []) if r.get("type") == t]
     attrs = {a.get("type", ""): a.get("value", "") for a in data.get("attributes", [])}
@@ -212,6 +245,12 @@ def musicbrainz_work(f: Fetcher, mbid: str) -> dict:
 
 def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: str,
                out_dir: Path, n_pages: int = 3) -> dict:
+    """Build or refresh ``<out_dir>/<work_mbid>.yaml`` for one composition.
+
+    Verified files are returned untouched.  Otherwise: MusicBrainz metadata, a
+    karnatik.com search under every known title alias, the top ``n_pages``
+    candidate pages parsed, and ``auto_select`` applied.
+    """
     out = out_dir / f"{work_mbid}.yaml"
     if out.exists():
         doc = yaml.safe_load(out.read_text(encoding="utf-8"))
@@ -239,8 +278,8 @@ def fetch_work(f: Fetcher, index: List[dict], work_mbid: str, title: str, raga: 
     return doc
 
 
-AUTO_SCORE = 0.9
-AUTO_RAGA = 0.85
+AUTO_SCORE = 0.9             # combined match score needed for auto-selection ...
+AUTO_RAGA = 0.85             # ... and raga similarity (same title, other raga = other song)
 
 
 def auto_select(doc: dict) -> dict:

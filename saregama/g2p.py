@@ -32,6 +32,7 @@ Ph = Tuple[str, int]          # (phone name, akshara index)
 
 @dataclass
 class Syllable:
+    """One syllable of a lyric line with its phones."""
     text: str                 # native-script text of the syllable
     phones: List[str]         # phone names
     word_index: int           # index of the word in its line
@@ -39,6 +40,7 @@ class Syllable:
 
     @property
     def nucleus(self) -> Optional[str]:
+        """First vowel phone of the syllable, or None."""
         for p in self.phones:
             if p in VOWELS:
                 return p
@@ -49,10 +51,13 @@ class Syllable:
 # Lexicon
 # ---------------------------------------------------------------------------
 class Lexicon:
+    """Word -> syllabified pronunciation overrides, read from TSV files."""
     def __init__(self) -> None:
+        """Start empty; use ``load`` to read files."""
         self.entries: Dict[str, List[List[str]]] = {}
 
     def add(self, word: str, syllables: List[List[str]]) -> None:
+        """Add a pronunciation (list of syllables of phone names); unknown phones raise."""
         for syl in syllables:
             for p in syl:
                 if p not in BY_NAME:
@@ -60,13 +65,18 @@ class Lexicon:
         self.entries[unicodedata.normalize("NFC", word)] = syllables
 
     def get(self, word: str) -> Optional[List[List[str]]]:
+        """Pronunciation of ``word`` (NFC-normalised), or None."""
         return self.entries.get(unicodedata.normalize("NFC", word))
 
     def __len__(self) -> int:
+        """Number of entries."""
         return len(self.entries)
 
     @classmethod
     def load(cls, *paths) -> "Lexicon":
+        """Lexicon from TSV files (``word<TAB>phones``, '.' between syllables,
+        '#' comments); missing paths are skipped.
+        """
         lex = cls()
         for path in paths:
             if not path or not Path(path).exists():
@@ -84,6 +94,7 @@ class Lexicon:
 
 
 def _is_matra(ch: str) -> bool:
+    """True for combining marks (vowel signs, virama, anusvara, ...)."""
     return unicodedata.category(ch) in ("Mn", "Mc")
 
 
@@ -133,6 +144,7 @@ BACK_VOWELS = {"a", "aa", "u", "uu", "o", "oo", "O"}
 
 @dataclass
 class _Seg:
+    """A phone produced from the akshara at ``src``; ``inherent`` marks a schwa."""
     phone: str
     src: int
     inherent: bool = False      # an inherent schwa (deletion candidate)
@@ -197,9 +209,11 @@ def _delete_schwas(segs: List[_Seg], medial: bool, keep_final: bool) -> List[_Se
     """Schwa deletion: word-final rule plus right-to-left V C _ C V rule."""
 
     def is_v(k: int) -> bool:
+        """True if position ``k`` is a vowel phone."""
         return 0 <= k < len(segs) and segs[k].phone in VOWELS
 
     def is_c(k: int) -> bool:
+        """True if position ``k`` is a consonant phone."""
         return 0 <= k < len(segs) and segs[k].phone in CONSONANTS
 
     drop = set()
@@ -228,6 +242,9 @@ def _delete_schwas(segs: List[_Seg], medial: bool, keep_final: bool) -> List[_Se
 
 
 def _resolve_anusvara(segs: List[_Seg]) -> List[Ph]:
+    """Turn anusvara into the nasal homorganic with the next consonant (or m /
+    nasalisation) and drop the segment flags.
+    """
     out: List[Ph] = []
     for k, s in enumerate(segs):
         if s.phone != "<anusvara>":
@@ -246,6 +263,9 @@ def _resolve_anusvara(segs: List[_Seg]) -> List[Ph]:
 def devanagari_word(word: str, lang: str, *, keep_final_schwa: bool = False,
                     delete_medial_schwa: bool = True,
                     marathi_affricates: bool = True) -> Tuple[List[Ph], List[str]]:
+    """Phones (with source akshara) and aksharas of a Hindi / Marathi word:
+    schwa deletion, anusvara resolution and Marathi dental affricates.
+    """
     segs, aks = _dev_parse(word, lang)
     segs = _delete_schwas(segs, delete_medial_schwa, keep_final_schwa)
     phones = _resolve_anusvara(segs)
@@ -282,6 +302,9 @@ NASALS = {"ng", "ny", "N", "n", "m", "nn"}
 
 def tamil_word(word: str, *, initial_c_as_s: bool = True,
                intervocalic_k: str = "g") -> Tuple[List[Ph], List[str]]:
+    """Phones (with source letter) and letters of a Tamil word, applying the
+    context rules for stops (voicing between vowels, initial c as s).
+    """
     w = unicodedata.normalize("NFC", word)
     raw: List[List] = []
     aks: List[str] = []
@@ -357,6 +380,7 @@ def tamil_word(word: str, *, initial_c_as_s: bool = True,
 # Shared
 # ---------------------------------------------------------------------------
 def _clean(phones: List[Ph]) -> List[Ph]:
+    """Check every phone is known and drop nasalisation not after a vowel."""
     out: List[Ph] = []
     for p, s in phones:
         if p not in BY_NAME:
@@ -412,6 +436,7 @@ _WORD_SPLIT = re.compile(r"[\s।॥,;:!?\.\"'()\[\]{}\-–—…|]+")
 
 
 def split_words(line: str) -> List[str]:
+    """Words of a lyric line (NFC; split on spaces and punctuation)."""
     return [w for w in _WORD_SPLIT.split(unicodedata.normalize("NFC", line)) if w]
 
 
@@ -463,4 +488,5 @@ def line_to_syllables(line: str, lang: str, lexicon: Optional[Lexicon] = None,
 
 def lyrics_to_syllables(lines: Iterable[str], lang: str, lexicon: Optional[Lexicon] = None,
                         **opts) -> List[List[Syllable]]:
+    """``line_to_syllables`` for every non-empty line."""
     return [line_to_syllables(l, lang, lexicon, **opts) for l in lines if l.strip()]

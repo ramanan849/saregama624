@@ -6,6 +6,7 @@ from saregama.stages.sync import SYNC_SR, estimate_offsets, shift, stem_lag
 
 
 def _signal(sr, dur, seed):
+    """Noise bursts with silences: broadband, so GCC-PHAT has a sharp peak."""
     rng = np.random.default_rng(seed)
     n = int(sr * dur)
     t = np.arange(n) / sr
@@ -20,6 +21,7 @@ def _signal(sr, dur, seed):
 
 
 def test_stem_lag_recovers_shift():
+    """A stem delayed by a known lag is measured to within a sample."""
     sr = SYNC_SR
     voice, perc = _signal(sr, 120.0, 0)
     lag_s = 0.00731
@@ -30,6 +32,7 @@ def test_stem_lag_recovers_shift():
 
 
 def test_estimate_offsets_and_alignment(tmp_path):
+    """Offsets from mp3-free WAV stems; writing them undoes the shift."""
     sr = 44100
     voice, perc = _signal(sr, 120.0, 1)
     lag_s = -0.0042

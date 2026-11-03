@@ -14,6 +14,7 @@ def _emissions(seq, n_cols, rng, frames_per_tok=3, filler_frames=12):
     and the (start, end) frame of every lyric item."""
     rows, spans = [], []
     def frame(col, p=0.9):  # noqa: E306
+        """Append one frame peaked (probability ``p``) on column ``col``."""
         v = np.full(n_cols, (1 - p) / (n_cols - 1))
         v[col] = p
         rows.append(np.log(v))
@@ -32,12 +33,14 @@ def _emissions(seq, n_cols, rng, frames_per_tok=3, filler_frames=12):
 
 
 def test_syllabify():
+    """Single consonants start the next syllable; clusters split after their first unit."""
     assert syllabify("manasaramati") == ["ma", "na", "sa", "ra", "ma", "ti"]
     assert syllabify("karnataka") == ["kar", "na", "ta", "ka"]
     assert syllabify("bhakti") == ["bhak", "ti"]
 
 
 def test_loop_alignment_recovers_order():
+    """Repeats, the next line and a return to the pallavi are recovered with spans."""
     rng = np.random.default_rng(0)
     sections = [{"name": "pallavi", "lines": ["sarigama padani", "ninnu kori"]},
                 {"name": "anupallavi", "lines": ["mohana rama"]}]
@@ -59,6 +62,7 @@ def test_loop_alignment_recovers_order():
 
 
 def test_long_hold_inside_a_line_is_resumed():
+    """A long filler inside a line is left and resumed, not stretched over."""
     rng = np.random.default_rng(1)
     lines = lyric_lines([{"name": "pallavi", "lines": ["sarigama padani", "ninnu kori"]}])
     sung = [None, "sarigama", None, None, None, None, None, None, None, None, "padani", None, "ninnu kori"]

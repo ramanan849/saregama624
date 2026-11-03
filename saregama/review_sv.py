@@ -86,21 +86,30 @@ def read_svl(path: Path) -> List[dict]:
 # --------------------------------------------------------------------- export
 
 def _hz(cents: float, tonic: float) -> float:
+    """Hz of ``cents`` above ``tonic``."""
     return float(tonic * 2 ** (cents / 1200))
 
 
 def _curve(t: np.ndarray, hz: np.ndarray) -> List[dict]:
+    """Time-value points for the voiced frames of an Hz curve."""
     v = np.isfinite(hz) & (hz > 0)
     return [{"start": float(a), "value": float(b)} for a, b in zip(t[v], hz[v])]
 
 
 def _median_hz(f0: np.ndarray, fps: float, a: float, b: float, default: float) -> float:
+    """Median voiced F0 over [a, b) seconds, or ``default`` if unvoiced there
+    (syllable regions are drawn at that height so they sit on the contour).
+    """
     seg = f0[int(a * fps):max(int(a * fps) + 1, int(b * fps))]
     seg = seg[seg > 0]
     return float(np.median(seg)) if len(seg) else default
 
 
 def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
+    """Write every review layer of a bundle into ``review/`` (see the module
+    docstring) and return {layer name: path}.  ``preview=False`` skips the
+    sync-preview audio, the slow part on long recordings.
+    """
     ir = b.load()
     out_dir = b.review_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +122,7 @@ def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
     layers: Dict[str, str] = {}
 
     def put(name, text):
+        """Write one layer file and remember its path."""
         (out_dir / f"{name}.svl").write_text(text, encoding="utf-8")
         layers[name] = str(out_dir / f"{name}.svl")
 
@@ -162,6 +172,9 @@ def export_review(b: Bundle, preview: bool = True) -> Dict[str, str]:
 
 
 def _readme(ir: dict, b: Bundle) -> str:
+    """Text of ``review/README.txt``: what is in the folder and the exact
+    commands to open and to re-import it.
+    """
     vocal = b.dir / ir["stems"]["vocal_clean"]["path"]
     svl = " ".join(f"{n}.svl" for n in LAYERS if (b.review_dir / f"{n}.svl").exists())
     return f"""{ir["title"]} ({ir.get("raaga", "")}, {ir.get("taala", "")}); Sa = {ir["tonic_hz"]} Hz
@@ -189,12 +202,19 @@ copying a line region (it says which lyric line was sung).
 # --------------------------------------------------------------- sync preview
 
 def _click(sr: int, freq: float, dur: float, decay: float) -> np.ndarray:
+    """A decaying sine burst: the tick / knock of the sync preview."""
     tt = np.arange(int(dur * sr)) / sr
     return np.sin(2 * np.pi * freq * tt) * np.exp(-tt / decay)
 
 
 def sync_preview(vocal_path: Path, f0: np.ndarray, fps: float, onsets: Sequence[float],
                  sama: Sequence[float], out_path: Path, sine_gain: float = 0.25) -> Path:
+    """Write the stereo sync-check file (see the module docstring).
+
+    The right channel's sine follows the F0 with continuous phase (pitch held
+    across unvoiced gaps so restarts do not click) and is gated by voicing with
+    a 10 ms ramp.  Syllable onsets get a short 2.5 kHz tick, sama a 0.7 kHz knock.
+    """
     x, sr = sf.read(str(vocal_path), dtype="float32", always_2d=True)
     x = x.mean(axis=1)
     peak = float(np.max(np.abs(x))) or 1.0
@@ -227,6 +247,7 @@ def sync_preview(vocal_path: Path, f0: np.ndarray, fps: float, onsets: Sequence[
 # --------------------------------------------------------------------- import
 
 def _inside(regions: List[dict], t: float) -> Optional[int]:
+    """Index of the region containing time ``t``, or None."""
     for i, r in enumerate(regions):
         if r["start"] <= t < r["end"]:
             return i
@@ -270,6 +291,14 @@ def lyrics_from_layers(lines: List[dict], words: List[dict], syls: List[dict]) -
 
 
 def import_review(b: Bundle, reviewer: str = "", corrected: Optional[Path] = None) -> dict:
+    """Read corrected layers from ``corrected`` (default
+    ``review/corrected/``) back into the bundle.
+
+    Lyrics are rebuilt only when lines, words and syllables are all present;
+    sections and sama replace the Saraga ones.  The recording is marked
+    ``status = reviewed`` (``align`` then skips it).  Returns a report with the
+    layers read, the number of instances and any problems found.
+    """
     src = corrected or (b.review_dir / "corrected")
     have = {n: src / f"{n}.svl" for n in EDITABLE if (src / f"{n}.svl").exists()}
     if not have:

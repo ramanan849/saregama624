@@ -76,6 +76,10 @@ def _segment_runs(q: np.ndarray, min_len: int) -> List[List[int]]:
 
 def build_notes(syllables: Sequence[SyllableAnn], f0: np.ndarray, tonic_hz: float,
                 n_frames: int, cfg: NotesCfg) -> List[NoteAnn]:
+    """Notes of a song: rests between syllables, and each syllable split into
+    pitch-stable runs (first run = lyric note, later runs = slur notes) with
+    MIDI pitch, exact median cents above the tonic and swara name.
+    """
     f0 = np.asarray(f0, dtype=np.float64)
     voiced = f0 > 0
     cents = np.full(n_frames, np.nan)
@@ -85,6 +89,7 @@ def build_notes(syllables: Sequence[SyllableAnn], f0: np.ndarray, tonic_hz: floa
     pos = 0
 
     def add_rest(a: int, b: int):
+        """Append a rest over [a, b), merging with a preceding rest."""
         if b > a:
             if notes and notes[-1].type == NOTE_REST and notes[-1].end == a:
                 notes[-1].end = b
@@ -157,11 +162,13 @@ def _stable_grid(c: np.ndarray, win: int, min_len: int) -> np.ndarray:
 
 
 def _midi(tonic_hz: float, cents: float) -> int:
+    """Nearest MIDI note of the pitch ``cents`` above ``tonic_hz`` (1..127)."""
     f = tonic_hz * 2 ** (cents / 1200)
     return int(np.clip(round(69 + 12 * np.log2(f / 440.0)), 1, 127))
 
 
 def _ffill_bfill(c: np.ndarray) -> np.ndarray:
+    """Fill NaNs forward, and the leading NaNs backward (all-NaN -> zeros)."""
     c = c.copy()
     idx = np.where(~np.isnan(c))[0]
     if len(idx) == 0:

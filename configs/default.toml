@@ -1,5 +1,8 @@
-# svs-annotate configuration.  Every key is optional; omitted keys keep the
-# defaults from svs_annotate/config.py.  Paths are relative to where you run.
+# Configuration of the legacy film-song workspace (`saregama run`, `export`, ...).
+# Every key is optional; omitted keys keep the defaults from saregama/config.py.
+# Paths are relative to where you run.  The Saraga commands do not read this file:
+# their data locations come from saregama/paths.py (or SAREGAMA_* environment
+# variables) and their settings from command-line options.
 
 work_dir = "work"        # song annotations, separated vocals, review files
 out_dir = "dataset"      # exported SoulX-Singer training set

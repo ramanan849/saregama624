@@ -31,6 +31,7 @@ STYLES = ("film", "bhajan", "hindustani", "carnatic", "bhavgeet", "natyasangeet"
 
 @dataclass
 class SyllableAnn:
+    """One sung syllable on the 50 fps grid ([start, end) frames)."""
     text: str                  # native script, e.g. "मन" or "ணக்"
     phones: List[str]          # phone names, e.g. ["m", "a", "n"]
     start: int                 # frame (inclusive)
@@ -43,6 +44,7 @@ class SyllableAnn:
 
 @dataclass
 class NoteAnn:
+    """One SoulX-Singer note on the 50 fps grid ([start, end) frames)."""
     start: int
     end: int
     type: int                  # 1 rest, 2 lyric (syllable onset), 3 slur
@@ -54,6 +56,9 @@ class NoteAnn:
 
 @dataclass
 class SongAnnotation:
+    """Master record of one legacy song: metadata, tonic, syllables, notes,
+    QC and the frame-level curves (``ARRAYS``, stored as .npy next to the JSON).
+    """
     song_id: str
     language: str              # hi | mr | ta
     style: str = "other"
@@ -85,6 +90,7 @@ class SongAnnotation:
     # ------------------------------------------------------------------
     @property
     def duration_s(self) -> float:
+        """Length in seconds (``n_frames`` / 50)."""
         return self.n_frames / FPS
 
     def cents(self) -> np.ndarray:
@@ -96,6 +102,7 @@ class SongAnnotation:
         return out
 
     def save(self, song_dir: str | Path) -> None:
+        """Write ``annotation.json`` plus one .npy per non-empty curve."""
         d = Path(song_dir)
         d.mkdir(parents=True, exist_ok=True)
         meta = asdict(self)
@@ -109,6 +116,7 @@ class SongAnnotation:
 
     @classmethod
     def load(cls, song_dir: str | Path) -> "SongAnnotation":
+        """Read an annotation written by ``save``."""
         d = Path(song_dir)
         meta = json.loads((d / "annotation.json").read_text(encoding="utf-8"))
         meta["syllables"] = [SyllableAnn(**s) for s in meta.get("syllables", [])]

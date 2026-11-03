@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 
 def test_annotator_round_trip():
+    """Train a tiny annotator, then use it as F0 and alignment backend (skipped without torch)."""
     try:
         import torch  # noqa: F401
     except Exception:

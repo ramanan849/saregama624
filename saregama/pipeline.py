@@ -42,6 +42,10 @@ REQUIRED = ("song_id", "audio", "language")
 
 
 def read_songs(csv_path: str | Path) -> List[Dict[str, str]]:
+    """Rows of songs.csv as dicts (whitespace stripped); relative ``audio`` and
+    ``lyrics`` paths are resolved against the CSV's folder.  Raises on a missing
+    required column value or a duplicate ``song_id``.
+    """
     base = Path(csv_path).parent
     rows = []
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -61,6 +65,7 @@ def read_songs(csv_path: str | Path) -> List[Dict[str, str]]:
 
 
 def g2p_opts(cfg: Config) -> Dict:
+    """Keyword options for the G2P functions, from the ``[g2p]`` config section."""
     g = cfg.g2p
     return {"keep_final_schwa": g.keep_final_schwa, "delete_medial_schwa": g.delete_medial_schwa,
             "marathi_affricates": g.marathi_affricates, "initial_c_as_s": g.tamil_initial_c_as_s,
@@ -68,7 +73,12 @@ def g2p_opts(cfg: Config) -> Dict:
 
 
 class Pipeline:
+    """Legacy film-song pipeline: separation, F0, tonic, alignment, notes,
+    quality curves and QC for each song of songs.csv, written as a
+    ``SongAnnotation`` under ``<work_dir>/songs/<song_id>/``.
+    """
     def __init__(self, cfg: Config, annotator=None):
+        """Keep the config and lexicon; models are built lazily on first use."""
         self.cfg = cfg
         self.work = Path(cfg.work_dir)
         self.annotator = annotator
@@ -80,28 +90,38 @@ class Pipeline:
     # lazily built so that `--stages` subsets don't load unneeded models
     @property
     def sep(self):
+        """The vocal separator (built on first access)."""
         if self._sep is None:
             self._sep = Separator(self.cfg.separation)
         return self._sep
 
     @property
     def f0est(self):
+        """The F0 ensemble (built on first access)."""
         if self._f0 is None:
             self._f0 = F0Estimator(self.cfg.f0, self.cfg.separation.soulx_repo, self.annotator)
         return self._f0
 
     @property
     def aligner(self):
+        """The CTC aligner (built on first access)."""
         if self._aligner is None:
             self._aligner = Aligner(self.cfg.align, self.annotator)
         return self._aligner
 
     def song_dir(self, song_id: str) -> Path:
+        """Folder of one song's annotation."""
         return self.work / "songs" / song_id
 
     # ------------------------------------------------------------------
     def run_song(self, row: Dict[str, str], force: bool = False,
                  emission: Optional[np.ndarray] = None) -> SongAnnotation:
+        """Annotate one song and return its annotation.
+
+        Reviewed and gold songs are never overwritten; other existing annotations
+        are returned unless ``force``.  ``emission`` injects precomputed CTC
+        log-probabilities (tests).
+        """
         cfg = self.cfg
         sid = row["song_id"]
         d = self.song_dir(sid)
@@ -153,7 +173,7 @@ class Pipeline:
         if not row.get("lyrics"):
             ann.status = "rejected"
             ann.qc = {"flags": ["no_lyrics"], "metrics": {},
-                      "note": "run `svs-annotate draft-lyrics` and correct the draft"}
+                      "note": "run `saregama draft-lyrics` and correct the draft"}
             ann.save(d)
             return ann
         lines = read_lyrics(row["lyrics"])
@@ -193,6 +213,9 @@ class Pipeline:
         return ann
 
     def run(self, songs: List[Dict[str, str]], force: bool = False) -> Dict[str, str]:
+        """``run_song`` for every row; errors are recorded per song (``error.txt``)
+        instead of stopping the batch.  Returns {song_id: status or error}.
+        """
         results = {}
         for row in songs:
             try:

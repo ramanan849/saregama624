@@ -52,10 +52,14 @@ Interval = Tuple[float, float, str]
 # minimal TextGrid / PitchTier I/O (long text format)
 # ---------------------------------------------------------------------------
 def _q(s: str) -> str:
+    """Praat string literal (double quotes doubled)."""
     return '"' + s.replace('"', '""') + '"'
 
 
 def write_textgrid(path: Path, xmax: float, tiers: List[Tuple[str, List[Interval]]]) -> None:
+    """Write a Praat long-format TextGrid of interval tiers; gaps between
+    intervals are filled with empty intervals, as Praat requires.
+    """
     out = ['File type = "ooTextFile"', 'Object class = "TextGrid"', "",
            "xmin = 0", f"xmax = {xmax:.6f}", "tiers? <exists>", f"size = {len(tiers)}", "item []:"]
     for ti, (name, ivs) in enumerate(tiers, 1):
@@ -70,6 +74,7 @@ def write_textgrid(path: Path, xmax: float, tiers: List[Tuple[str, List[Interval
 
 
 def _fill_gaps(ivs: List[Interval], xmax: float) -> List[Interval]:
+    """Sorted, non-overlapping intervals covering [0, xmax] (gaps get '')."""
     out: List[Interval] = []
     t = 0.0
     for a, b, lab in sorted(ivs):
@@ -85,6 +90,7 @@ def _fill_gaps(ivs: List[Interval], xmax: float) -> List[Interval]:
 
 
 def read_textgrid(path: Path) -> Dict[str, List[Interval]]:
+    """Interval tiers of a long-format TextGrid as {name: [(xmin, xmax, text)]}."""
     txt = path.read_text(encoding="utf-8")
     tiers: Dict[str, List[Interval]] = {}
     for block in re.split(r"\n\s*item \[\d+\]:\s*\n", txt)[1:]:
@@ -101,6 +107,7 @@ def read_textgrid(path: Path) -> Dict[str, List[Interval]]:
 
 
 def write_pitchtier(path: Path, f0: np.ndarray, xmax: float) -> None:
+    """Write the voiced F0 frames as a Praat PitchTier (for viewing next to the TextGrid)."""
     pts = [(k / FPS, float(f)) for k, f in enumerate(f0) if f > 0]
     out = ['File type = "ooTextFile"', 'Object class = "PitchTier"', "", "xmin = 0",
            f"xmax = {xmax:.6f}", f"points: size = {len(pts)}"]
@@ -121,12 +128,16 @@ Open in Praat: Read vocals.wav and {song_id}.TextGrid, select both, View & Edit.
 4. f0_fix tier: add intervals x2, /2, uv, or +/-cents where the F0 track (PitchTier,
    or Praat's own pitch display) shows octave errors or bleed.
 5. Save the TextGrid in place, then run:
-   svs-annotate import-review --song {song_id} [--gold]
+   saregama import-review --song {song_id} [--gold]
 """
 
 
 def export_review(cfg: Config, song_ids: Optional[List[str]] = None, only_status=("flagged",),
                   out_dir: Optional[str] = None) -> List[str]:
+    """Write TextGrid, PitchTier and vocals for the songs to review (by default
+    the flagged ones) plus ``queue.tsv`` ordered by review priority.  Returns
+    the song ids.
+    """
     from .stages.qc import review_priority
     work = Path(cfg.work_dir)
     rdir = Path(out_dir or work / "review")
@@ -181,6 +192,10 @@ def export_review(cfg: Config, song_ids: Optional[List[str]] = None, only_status
 
 
 def _apply_f0_fixes(f0: np.ndarray, fixes: List[Interval]) -> Tuple[np.ndarray, int]:
+    """Apply the reviewer's ``f0_fix`` tier: ``x2`` / ``/2`` shift the interval
+    by an octave, ``uv`` unvoices it, ``+30`` / ``-15`` shift it by cents.
+    Returns (fixed F0, number of intervals applied).
+    """
     f0 = f0.copy()
     nfix = 0
     for a, b, lab in fixes:
@@ -207,6 +222,10 @@ def _apply_f0_fixes(f0: np.ndarray, fixes: List[Interval]) -> Tuple[np.ndarray, 
 
 def import_review(cfg: Config, song_id: str, textgrid: Optional[str] = None, gold: bool = False,
                   keep_notes: bool = False, reviewer: str = "") -> SongAnnotation:
+    """Read a corrected TextGrid back into a song annotation: syllables (with
+    fresh G2P), optional line / tonic / F0 fixes; marks the song reviewed (or
+    gold) and, unless ``keep_notes``, rebuilds the notes.
+    """
     from .pipeline import g2p_opts
     work = Path(cfg.work_dir)
     d = work / "songs" / song_id
@@ -281,9 +300,11 @@ def import_review(cfg: Config, song_id: str, textgrid: Optional[str] = None, gol
 
 
 def _line_lookup(line_ivs: List[Interval]):
+    """Function t -> index of the non-empty line interval containing t."""
     spans = [(a, b, k) for k, (a, b, l) in enumerate([iv for iv in line_ivs if iv[2].strip()])]
 
     def f(t: float, default: int) -> int:
+        """Line index at time ``t``, or ``default`` outside every line."""
         for a, b, k in spans:
             if a <= t < b:
                 return k

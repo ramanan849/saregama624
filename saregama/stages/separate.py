@@ -9,8 +9,15 @@ audio_separator  The ``audio-separator`` package (pip install audio-separator[gp
                  which can run the same RoFormer checkpoints by file name.
 none             Input is already a dry vocal (your vocal-only files).
 
-Output: dry lead vocal, mono, 24 kHz, loudness-normalised, plus the accompaniment
-estimate when the backend gives one (used for a leakage score in QC).
+``Separator.process`` (legacy workspace, full mixes) outputs the dry lead vocal,
+mono, 24 kHz, loudness-normalised, plus the accompaniment estimate when the
+backend gives one (used for a leakage score in QC).
+
+``clean_stem`` (Saraga pipeline, stage ``stems``) instead runs the same models on
+a close-mic *vocal stem* to remove violin / percussion / second-singer bleed and
+room reverb, keeping the stem's rate, length and level so it stays
+sample-aligned with the mix.  On the pilot it takes the bleed in silent
+stretches from about -52 dB to digital silence.
 """
 from __future__ import annotations
 
@@ -27,11 +34,19 @@ from ..config import SeparationCfg
 
 
 class Separator:
+    """Lazy wrapper around a separation backend (see the module docstring).
+    The model is loaded on first use so commands that only need ``clean_stem``
+    or nothing at all stay cheap.
+    """
     def __init__(self, cfg: SeparationCfg):
+        """Keep the config; the model is loaded on first ``process`` / ``clean_stem``."""
         self.cfg = cfg
         self._impl = None
 
     def _load_soulx(self):
+        """Import SoulX-Singer's ``VocalSeparator`` from the local clone and load
+        the karaoke and de-reverb Mel-RoFormer checkpoints from ``soulx_models``.
+        """
         repo = Path(self.cfg.soulx_repo).resolve()
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
@@ -48,6 +63,7 @@ class Separator:
         )
 
     def _load_audio_separator(self):
+        """Load ``audio_separator_model`` with the audio-separator package."""
         from audio_separator.separator import Separator as AS  # type: ignore
         sep = AS(output_dir=tempfile.mkdtemp(prefix="sep_"), output_format="WAV")
         sep.load_model(model_filename=self.cfg.audio_separator_model)
@@ -55,6 +71,12 @@ class Separator:
 
     def process(self, audio_path: str, out_vocals: str,
                 out_accomp: Optional[str] = None) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Separate the lead vocal of a full mix (legacy workspace).
+
+        Writes the loudness-normalised 24 kHz mono vocal to ``out_vocals`` (and the
+        accompaniment to ``out_accomp`` when the backend gives one) and returns both
+        arrays.  Not used for Saraga stems: see ``clean_stem``.
+        """
         backend = self.cfg.backend
         accomp = None
         if backend == "none":

@@ -39,6 +39,7 @@ def _swara_lines(positions: Dict[str, float], lo: float, hi: float):
 
 
 def _style(ax):
+    """Shared axis style: recessive spines and ticks on the light surface."""
     ax.set_facecolor(SURFACE)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
@@ -48,6 +49,10 @@ def _style(ax):
 
 
 def _panel(ax, t, cents, segs, positions, tonic, t0, t1, ylim, sections, sama, syllables):
+    """Draw one 30 s panel ``[t0, t1)``: swara gridlines (Hz on Sa lines),
+    kampita bands, glide and sustained-swara highlights, the contour, section
+    labels, sama ticks and lyric syllables (sargam in italics).
+    """
     m = (t >= t0) & (t < t1)
     for c, name in _swara_lines(positions, *ylim):
         ax.axhline(c, color=GRID, lw=0.6, zorder=0)
@@ -89,6 +94,13 @@ def _panel(ax, t, cents, segs, positions, tonic, t0, t1, ylim, sections, sama, s
 def contour_pdf(out: Path, title: str, tonic: float, raga: str, f0_npz: Path, swaras: dict,
                 sections: List[dict], sama: List[float], syllables: Optional[List[dict]] = None,
                 max_pages: Optional[int] = None) -> Path:
+    """Write the contour sheets for one recording to ``out`` (A4 landscape).
+
+    Page 1 is the whole-recording overview with the stable-time histogram per
+    swara and a text summary; then ``PANELS_PER_PAGE`` 30 s panels per page.
+    ``syllables`` = [{text, start, sargam}] from ``lyrics.json``; ``max_pages``
+    limits the panel pages (quick previews).
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt

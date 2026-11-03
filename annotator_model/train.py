@@ -25,6 +25,7 @@ from .model import Annotator, annotator_loss
 
 @torch.no_grad()
 def evaluate(model, loader, device) -> dict:
+    """Mean validation losses, gross pitch error (> 50 cents) and onset F1."""
     model.eval()
     tot, n = {}, 0
     gross, voiced, on_hit, on_pred, on_gold = 0, 0, 0, 0, 0
@@ -59,6 +60,7 @@ def evaluate(model, loader, device) -> dict:
 
 
 def main(argv=None):
+    """``python -m annotator_model.train --data <dataset> --out <dir> ...``"""
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--out", required=True)

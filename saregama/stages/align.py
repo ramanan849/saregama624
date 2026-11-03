@@ -38,6 +38,9 @@ from ..phoneset import BY_NAME, VOWELS
 # ---------------------------------------------------------------------------
 @dataclass
 class TokenSeq:
+    """Flat CTC token sequence of the lyrics with the syllable each token
+    belongs to (star tokens absorb non-lyric singing between syllables).
+    """
     ids: np.ndarray            # token ids into the emission columns
     syl: np.ndarray            # syllable index per token, -1 for star tokens
     is_star: np.ndarray
@@ -51,6 +54,7 @@ def build_tokens(lines: List[List[Syllable]], unit: str, vocab: Dict[str, int],
     index: List[Tuple[int, int]] = []
 
     def add_star():
+        """Append a star token (when the vocabulary has one)."""
         if star_id is not None:
             ids.append(star_id)
             syl.append(-1)
@@ -144,6 +148,7 @@ class Emitter:
     vocab: Dict[str, int] = {}
 
     def __call__(self, vocals24k: np.ndarray, n_frames: int) -> np.ndarray:
+        """(n_frames, C) CTC log-probabilities for 24 kHz vocals; implemented by subclasses."""
         raise NotImplementedError
 
 
@@ -170,20 +175,24 @@ def _chunked(fn: Callable[[np.ndarray], np.ndarray], x16: np.ndarray, n_frames: 
 
 
 def _fit_rows(e: np.ndarray, n: int) -> np.ndarray:
+    """Truncate ``e`` to ``n`` rows, or repeat its last row up to ``n``."""
     if len(e) >= n:
         return e[:n]
     return np.concatenate([e, np.repeat(e[-1:], n - len(e), axis=0)], axis=0)
 
 
 def _log_softmax(z: np.ndarray) -> np.ndarray:
+    """Numerically stable log-softmax over the last axis."""
     z = z - z.max(axis=-1, keepdims=True)
     return z - np.log(np.exp(z).sum(axis=-1, keepdims=True))
 
 
 class MmsFaEmitter(Emitter):
+    """torchaudio MMS_FA emissions over roman letters (optionally with star)."""
     unit = "roman"
 
     def __init__(self, cfg: AlignCfg):
+        """Load MMS_FA and its letter dictionary on ``cfg.device``."""
         import torch
         import torchaudio  # type: ignore
         self.torch, self.cfg = torch, cfg
@@ -195,9 +204,11 @@ class MmsFaEmitter(Emitter):
         self.star_id = self.vocab.get("*") if cfg.use_star else None
 
     def __call__(self, vocals24k: np.ndarray, n_frames: int) -> np.ndarray:
+        """Log-probabilities on ``n_frames`` 50 fps frames for 24 kHz vocals."""
         x16 = resample(vocals24k, SR, 16000)
 
         def run(seg):
+            """Emissions of one 16 kHz chunk."""
             with self.torch.inference_mode():
                 w = self.torch.from_numpy(seg).float()[None].to(self.cfg.device)
                 e, _ = self.model(w)
@@ -207,9 +218,11 @@ class MmsFaEmitter(Emitter):
 
 
 class HfCtcEmitter(Emitter):
+    """Any Hugging Face CTC model over roman letters (``cfg.hf_model``)."""
     unit = "roman"
 
     def __init__(self, cfg: AlignCfg):
+        """Load the model and tokenizer; the pad token is the CTC blank."""
         import torch
         from transformers import AutoModelForCTC, AutoTokenizer  # type: ignore
         self.torch, self.cfg = torch, cfg
@@ -220,9 +233,11 @@ class HfCtcEmitter(Emitter):
         self.star_id = self.vocab.get("<star>", self.vocab.get("*")) if cfg.use_star else None
 
     def __call__(self, vocals24k: np.ndarray, n_frames: int) -> np.ndarray:
+        """Log-probabilities on ``n_frames`` 50 fps frames for 24 kHz vocals."""
         x16 = resample(vocals24k, SR, 16000)
 
         def run(seg):
+            """Emissions of one 16 kHz chunk (zero-mean, unit-variance input)."""
             seg = (seg - seg.mean()) / (seg.std() + 1e-7)
             with self.torch.inference_mode():
                 w = self.torch.from_numpy(seg).float()[None].to(self.cfg.device)
@@ -233,15 +248,18 @@ class HfCtcEmitter(Emitter):
 
 
 class AnnotatorEmitter(Emitter):
+    """Phone posteriors of the trained unified annotator (``annotator_model``)."""
     unit = "phone"
 
     def __init__(self, cfg: AlignCfg, annotator):
+        """Use ``annotator``'s phone vocabulary (blank = column 0)."""
         self.annotator = annotator
         self.vocab = annotator.phone_vocab()          # phone name -> column, blank = 0
         self.blank = 0
         self.star_id = self.vocab.get("*") if cfg.use_star else None
 
     def __call__(self, vocals24k: np.ndarray, n_frames: int) -> np.ndarray:
+        """Phone log-probabilities on ``n_frames`` frames."""
         return self.annotator.phone_logprobs(vocals24k, n_frames)
 
 
@@ -282,6 +300,9 @@ def heuristic_onsets(lines: List[List[Syllable]], f0: np.ndarray, energy_db: np.
 
 
 def _phrases(mask: np.ndarray, min_gap: int, min_len: int) -> List[Tuple[int, int]]:
+    """Runs of ``mask`` merged across gaps shorter than ``min_gap`` frames,
+    keeping runs of at least ``min_len`` frames.
+    """
     runs, k, n = [], 0, len(mask)
     while k < n:
         if mask[k]:
@@ -306,6 +327,7 @@ def _phrases(mask: np.ndarray, min_gap: int, min_len: int) -> List[Tuple[int, in
 # ---------------------------------------------------------------------------
 @dataclass
 class AlignedSyllable:
+    """A syllable's aligned [start, end) frames, confidence and kind."""
     line: int
     index: int                  # index within line
     start: int
@@ -315,6 +337,7 @@ class AlignedSyllable:
 
 
 def _runs_of(mask: np.ndarray, a: int, b: int, min_len: int = 1) -> List[Tuple[int, int]]:
+    """[(start, end)) runs of ``mask`` inside [a, b) of at least ``min_len`` frames."""
     out, k = [], a
     while k < b:
         if mask[k]:
@@ -416,7 +439,11 @@ def syllable_intervals(onsets: np.ndarray, last_token_end: np.ndarray, confs: np
 # driver
 # ---------------------------------------------------------------------------
 class Aligner:
+    """Legacy syllable aligner: CTC emissions (MMS_FA, HF CTC, the annotator,
+    or external) + Viterbi forced alignment, with a heuristic onset fallback.
+    """
     def __init__(self, cfg: AlignCfg, annotator=None):
+        """Pick the emitter for ``cfg.backend`` (heuristic needs none)."""
         self.cfg = cfg
         self.emitter: Optional[Emitter] = None
         if cfg.backend == "mms_fa":
@@ -433,6 +460,11 @@ class Aligner:
     def align(self, vocals: np.ndarray, lines: List[List[Syllable]], f0: np.ndarray,
               energy_db: np.ndarray, emission: Optional[np.ndarray] = None
               ) -> Tuple[List[AlignedSyllable], Dict]:
+        """Align the syllables of ``lines`` to the vocals.
+
+        Returns the aligned syllables (lyric ones and voiced stretches absorbed by
+        the star, labelled vocalise) and an info dict (backend, confidence ...).
+        """
         n = len(f0)
         sylls_index = [(li, si) for li, line in enumerate(lines) for si in range(len(line))]
         info: Dict = {"backend": self.cfg.backend}

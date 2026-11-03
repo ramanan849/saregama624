@@ -1,4 +1,13 @@
-"""Stage 6 - lyric alignment for Carnatic kritis with repeats.
+"""Stage 6 - lyric alignment for Carnatic kritis with repeats: shared pieces
+and the frame-level trellis engine (``align --engine trellis``).
+
+The default engine is :mod:`align_spikes`; it reuses this module's text
+handling (``romanise``, ``syllabify``, ``lyric_lines``), the line graph
+(``build_graph``, ``with_sargam``, ``transition_penalties``), the section
+rules (``region_lines``), the MMS emitter, the result types and
+``extend_sustain``.  The trellis below was the first engine; it is kept for
+comparison but loses to the filler on most melismatic singing, because MMS
+is ~98% blank there and a heard letter beats filler by only ~0.3 nats.
 
 A kriti is not sung as written: lines repeat with variations (sangati), one
 line is looped for minutes (neraval), the pallavi returns after every
@@ -49,6 +58,10 @@ VOWELS = set("aeiou")
 
 @dataclass
 class AlignCfgK:
+    """Penalties (log domain) of the trellis engine; see the module docstring.
+    ``repeat`` / ``ret`` / ``jump`` are also reused by the spike engine for the
+    line-to-line transitions.
+    """
     filler_cost: float = -0.1     # per-frame cost of "not lyrics" (blank or akaram vowels)
     repeat: float = -1.0
     ret: float = -2.0
@@ -77,6 +90,7 @@ def romanise(s: str) -> str:
 
 
 def _units(word: str) -> List[str]:
+    """Letters of a romanised word, keeping aspirate / nasal digraphs together."""
     out, i = [], 0
     while i < len(word):
         if word[i:i + 2] in DIGRAPHS:
@@ -121,6 +135,9 @@ def syllabify(word: str) -> List[str]:
 
 @dataclass
 class Line:
+    """One lyric line: ``id`` (index over the whole song), its section name,
+    original text, romanised words and their syllables.
+    """
     id: int
     section: str
     text: str
@@ -129,6 +146,7 @@ class Line:
 
 
 def lyric_lines(sections: List[dict]) -> List[Line]:
+    """Lines of a lyrics document (sections as in the lyrics YAML) in order."""
     out = []
     for sec in sections:
         for text in sec["lines"]:
@@ -142,6 +160,10 @@ def lyric_lines(sections: List[dict]) -> List[Line]:
 
 @dataclass
 class Graph:
+    """Every line's CTC chain (blank, letter, blank, ... , blank) concatenated
+    into one state space, with per-state lookups back to line / word /
+    syllable and the entry / exit points used by the line-loop transitions.
+    """
     lab: np.ndarray               # (S,) emission column per chain state
     line_of: np.ndarray           # (S,) line index
     pos: np.ndarray               # (S,) state index within its line chain (0 .. 2n)
@@ -157,6 +179,9 @@ class Graph:
 
 
 def build_graph(lines: List[Line], vocab: Dict[str, int], blank: int) -> Graph:
+    """Build the CTC state space of ``lines`` over the emission vocabulary
+    (letters missing from ``vocab`` are dropped).
+    """
     lab, line_of, pos, tok, word, syl, allow2 = [], [], [], [], [], [], []
     starts, ends, wend, wstart = [], [], [], []
     for li, ln in enumerate(lines):
@@ -404,6 +429,7 @@ def loop_viterbi(logp: np.ndarray, g: Graph, P: np.ndarray, cfg: AlignCfgK, blan
 
 @dataclass
 class SylSpan:
+    """Aligned syllable: text and [start, end) in seconds (mix clock)."""
     text: str
     start: float
     end: float
@@ -411,6 +437,7 @@ class SylSpan:
 
 @dataclass
 class WordSpan:
+    """Aligned word with its syllables."""
     text: str
     start: float
     end: float
@@ -419,6 +446,13 @@ class WordSpan:
 
 @dataclass
 class Instance:
+    """One sung occurrence of a lyric line (or a sargam syllable).
+
+    ``complete``: reached the line's last letters; ``llr``: engine-specific
+    confidence (trellis: mean letter-vs-filler log-likelihood ratio; spikes:
+    mean log p(letter | non-blank) of matched spikes); ``flags`` e.g.
+    ``low_conf``, ``resumed``, ``matched_X_of_Y``, ``reviewed``.
+    """
     line_id: int
     section: str
     start: float
@@ -432,6 +466,11 @@ class Instance:
 
 def instances_from_path(line_path, state_path, logp, g: Graph, cfg: AlignCfgK, blank: int,
                         t0: float = 0.0, region: str = "", insert_cols: Sequence[int] = ()) -> List[Instance]:
+    """Turn the Viterbi path into instances: contiguous frames in one line
+    with non-decreasing chain position form an instance; pieces of one line
+    resumed within ``merge_gap_s`` are merged (flag ``resumed``); instances
+    whose ``llr`` is below ``min_conf_llr`` are flagged ``low_conf``.
+    """
     T = len(line_path)
     filler_emit = filler_scores(logp, cfg, blank, insert_cols)
     out = []
@@ -521,6 +560,7 @@ def extend_sustain(instances: List[Instance], voiced: np.ndarray, fps: float = 1
 # ----------------------------------------------------------------------------- sections
 
 def _label(s: str) -> str:
+    """Lower-case section label without diacritics (Caraṇam -> caranam)."""
     s = unicodedata.normalize("NFKD", s)
     return "".join(ch for ch in s if not unicodedata.combining(ch)).lower().strip()
 
@@ -551,6 +591,7 @@ class MmsEmitter:
     is modelled explicitly)."""
 
     def __init__(self, cfg: AlignCfgK):
+        """Load torchaudio's MMS_FA model (letters a-z, blank '-') on ``cfg.device``."""
         import torch
         import torchaudio  # type: ignore
         self.torch, self.cfg = torch, cfg
@@ -560,6 +601,9 @@ class MmsEmitter:
         self.blank = self.vocab["-"]
 
     def __call__(self, x16: np.ndarray) -> np.ndarray:
+        """(T, C) log-probabilities at 50 fps for 16 kHz audio, computed in
+        ``chunk_s`` chunks with ``overlap_s`` of context on each side.
+        """
         hop, chunk, ov = 320, int(self.cfg.chunk_s * 16000), int(self.cfg.overlap_s * 16000)
         n = int(np.ceil(len(x16) / hop))
         pieces, pos = [], 0
@@ -611,6 +655,7 @@ def align_regions(logp: np.ndarray, lines: List[Line], regions: List[dict], voca
 
 
 def to_json(lines: List[Line], instances: List[Instance], report: List[dict], source: dict) -> dict:
+    """``lyrics.json`` content: lyric source, lines, instances, per-region report."""
     return {"source": source,
             "lines": [asdict(l) for l in lines],
             "instances": [asdict(i) for i in instances],

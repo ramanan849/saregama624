@@ -1,5 +1,5 @@
 # Pronunciation overrides: word<TAB>phones, with '.' between syllables.
-# Phones are the names in svs_annotate/phoneset.py (run `svs-annotate phoneset`).
+# Phones are the names in saregama/phoneset.py (run `saregama phoneset`).
 # Words listed here bypass the G2P rules - use it for sung variants, loanwords,
 # Marathi च/ज exceptions and Tamil allophony exceptions.  Examples (uncomment):
 #

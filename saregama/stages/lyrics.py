@@ -24,6 +24,9 @@ from ..audio import FPS, SR, save_audio
 
 
 def read_lyrics(path: str | Path) -> List[str]:
+    """Sung lines of a lyric sheet: NFC-normalised, without blank lines,
+    ``#`` comments and ``[section]`` markers.
+    """
     lines = []
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         line = unicodedata.normalize("NFC", raw.strip())
@@ -44,6 +47,7 @@ class IndicConformerASR:
     """
 
     def __init__(self, model_path: str, device: str = "cuda", decoder: str = "ctc"):
+        """Load an IndicConformer .nemo checkpoint (CTC decoder by default)."""
         import nemo.collections.asr as nemo_asr  # type: ignore
         self.model = nemo_asr.models.ASRModel.restore_from(model_path, map_location=device)
         self.model.eval()
@@ -53,6 +57,7 @@ class IndicConformerASR:
             pass
 
     def __call__(self, wav_paths: List[str], lang: str) -> List[str]:
+        """Transcripts of the given wav files in language ``lang``."""
         out = self.model.transcribe(wav_paths, batch_size=8, language_id=lang)
         if isinstance(out, tuple):
             out = out[0]

@@ -1,5 +1,10 @@
-"""Pipeline configuration.  Defaults live here; override them with a TOML file
-(see ``configs/default.toml``) passed as ``--config``."""
+"""Model and stage settings as dataclasses.
+
+Defaults live here (model locations come from :mod:`saregama.paths`).  The
+legacy workspace commands read overrides from a TOML file (see
+``configs/default.toml``) passed as ``--config``; the Saraga commands build
+the sections they need directly from their CLI options.
+"""
 from __future__ import annotations
 
 import tomllib
@@ -7,12 +12,20 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import List, Optional
 
+from .paths import SOULX_MODELS, SOULX_REPO
+
 
 @dataclass
 class SeparationCfg:
+    """Vocal separation / de-reverb (stage ``stems``; legacy ``run``).
+
+    ``backend`` soulx uses SoulX-Singer's Mel-RoFormer karaoke + de-reverb models
+    from ``soulx_models``; audio_separator runs the same checkpoint through the
+    ``audio-separator`` package; none means the input is already a dry vocal.
+    """
     backend: str = "soulx"            # soulx | audio_separator | none
-    soulx_repo: str = "/home/kartiksingh/Gokul/624/SoulX-Singer"
-    soulx_models: str = "/home/kartiksingh/Gokul/624/SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess"
+    soulx_repo: str = str(SOULX_REPO)
+    soulx_models: str = str(SOULX_MODELS)
     dereverb: bool = True
     audio_separator_model: str = "mel_band_roformer_karaoke_becruily.ckpt"
     device: str = "cuda"
@@ -20,8 +33,11 @@ class SeparationCfg:
 
 @dataclass
 class F0Cfg:
+    """F0 ensemble.  The first backend is the reference the others are
+    octave-aligned to; the Saraga pipeline runs ``rmvpe,fcpe,crepe``.
+    """
     backends: List[str] = field(default_factory=lambda: ["rmvpe", "yin"])
-    rmvpe_model: str = "/home/kartiksingh/Gokul/624/SoulX-Singer/pretrained_models/SoulX-Singer-Preprocess/rmvpe/rmvpe.pt"
+    rmvpe_model: str = str(SOULX_MODELS / "rmvpe" / "rmvpe.pt")
     fmin: float = 60.0
     fmax: float = 1400.0
     agree_cents: float = 50.0          # ensemble members "agree" within this
@@ -33,6 +49,9 @@ class F0Cfg:
 
 @dataclass
 class TonicCfg:
+    """Legacy tonic estimation (histogram); the Saraga pipeline uses
+    ``stages.f0_ir.choose_tonic`` and the concert consensus instead.
+    """
     method: str = "histogram"          # histogram | given
     pa_weight: float = 0.6             # weight of the fifth (Pa) in candidate scoring
     ma_weight: float = 0.2
@@ -40,6 +59,9 @@ class TonicCfg:
 
 @dataclass
 class AlignCfg:
+    """Legacy frame-level CTC alignment (``stages.align``) used by the
+    film-song workspace.  Saraga kritis use ``stages.align_spikes``.
+    """
     backend: str = "mms_fa"            # mms_fa | hf_ctc | annotator | heuristic
     hf_model: str = ""                 # HF id or path, for hf_ctc
     annotator_ckpt: str = ""           # for the trained unified annotator
@@ -54,6 +76,7 @@ class AlignCfg:
 
 @dataclass
 class NotesCfg:
+    """Legacy note segmentation for SoulX clips (``stages.notes``)."""
     backend: str = "grid"              # grid | rosvot | some
     min_note_s: float = 0.08
     smooth_frames: int = 5          # stability window (frames) for note segmentation
@@ -62,6 +85,7 @@ class NotesCfg:
 
 @dataclass
 class ClipCfg:
+    """How songs are cut into SoulX-Singer training clips."""
     min_s: float = 2.0
     max_s: float = 16.0
     split_rest_s: float = 0.3          # cut only at rests at least this long
@@ -70,6 +94,7 @@ class ClipCfg:
 
 @dataclass
 class QcCfg:
+    """Thresholds that route legacy songs to auto / flagged review."""
     min_align_conf: float = -2.5       # mean log-posterior per token (MMS scale)
     min_f0_agree: float = 0.85
     max_octave_jump_rate: float = 0.02
@@ -81,6 +106,7 @@ class QcCfg:
 
 @dataclass
 class G2PCfg:
+    """Rule-based G2P options (Hindi, Marathi, Tamil) plus lexicon files."""
     lexicon: List[str] = field(default_factory=lambda: ["lexicons/common.tsv"])
     keep_final_schwa: bool = False
     delete_medial_schwa: bool = True
@@ -91,6 +117,7 @@ class G2PCfg:
 
 @dataclass
 class Config:
+    """All sections of the legacy workspace configuration (``--config`` TOML)."""
     work_dir: str = "work"
     out_dir: str = "dataset"
     separation: SeparationCfg = field(default_factory=SeparationCfg)
@@ -103,10 +130,14 @@ class Config:
     g2p: G2PCfg = field(default_factory=G2PCfg)
 
     def to_dict(self) -> dict:
+        """Plain nested dict of every setting (for logging / provenance)."""
         return asdict(self)
 
 
 def _update(obj, data: dict):
+    """Recursively copy ``data`` (from TOML) onto dataclass ``obj``;
+    unknown keys raise ``KeyError`` so typos never pass silently.
+    """
     names = {f.name: f for f in fields(obj)}
     for k, v in data.items():
         if k not in names:
@@ -119,6 +150,7 @@ def _update(obj, data: dict):
 
 
 def load_config(path: Optional[str | Path] = None, **overrides) -> Config:
+    """Defaults, then the TOML at ``path`` (if any), then ``overrides``."""
     cfg = Config()
     if path:
         with open(path, "rb") as f:

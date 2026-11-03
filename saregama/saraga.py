@@ -25,7 +25,9 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-DEFAULT_ROOT = Path("/home/kartiksingh/Gokul/624/Datasets/Saraga/files/saraga1.5_carnatic")
+from .paths import SARAGA_CARNATIC
+
+DEFAULT_ROOT = SARAGA_CARNATIC  # see paths.py; override with SAREGAMA_SARAGA or --saraga-root
 STEMS = ("vocal", "vocal-s", "violin", "mridangam-left", "mridangam-right", "ghatam")
 ANNOTATIONS = ("pitch", "pitch-vocal", "ctonic", "sections-manual-p", "sections-manual",
                "sama-manual", "bpm-manual", "tempo-manual", "mphrases-manual")
@@ -37,6 +39,12 @@ MANIFEST_HEADER = ["mbid", "title", "concert", "dir", "mix", "length_s", "raaga"
 
 @dataclass
 class Recording:
+    """One Saraga recording: its files and the metadata the pipeline uses.
+
+    ``stems`` maps stem name (vocal, vocal-s, violin, mridangam-left, ...) to the
+    mp3; ``ann`` maps annotation name (pitch, ctonic, sections-manual-p, ...) to
+    the text file.  Times in every annotation are on the mix clock.
+    """
     mbid: str
     title: str
     concert: str
@@ -54,9 +62,13 @@ class Recording:
 
     @property
     def has_stems(self) -> bool:
+        """True when the recording has a close-mic vocal stem."""
         return "vocal" in self.stems
 
     def tonic(self) -> Optional[float]:
+        """Saraga's ``ctonic`` in Hz, or None.  Sometimes Pa instead of Sa:
+        see ``stages.f0_ir.choose_tonic``.
+        """
         return load_tonic(self.ann["ctonic"]) if "ctonic" in self.ann else None
 
     def pitch(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -71,12 +83,16 @@ class Recording:
         return {k: load_pitch(self.ann[k]) for k in ("pitch-vocal", "pitch") if k in self.ann}
 
     def sections(self) -> List[dict]:
+        """Manual section annotation [{start, end, label}] (``-p`` version
+        preferred), or [] if the recording has none.
+        """
         for key in ("sections-manual-p", "sections-manual"):
             if key in self.ann:
                 return load_sections(self.ann[key])
         return []
 
     def sama(self) -> np.ndarray:
+        """Manual sama (first beat of the tala cycle) times in seconds."""
         return load_times(self.ann["sama-manual"]) if "sama-manual" in self.ann else np.zeros(0)
 
 
@@ -99,10 +115,14 @@ def _classify(name: str, prefix: str) -> Tuple[str, str]:
 
 
 def _names(items, key="name") -> str:
+    """``"a; b"`` from a list of metadata dicts' ``key`` field."""
     return "; ".join(x.get(key, "") for x in items or [])
 
 
 def load_recording(rec_dir: Path) -> Optional[Recording]:
+    """Recording from a recording folder (needs exactly one metadata JSON,
+    whose basename is the prefix shared by every file); None otherwise.
+    """
     metas = [p for p in rec_dir.glob("*.json")]
     if len(metas) != 1:
         return None
@@ -130,6 +150,7 @@ def load_recording(rec_dir: Path) -> Optional[Recording]:
 
 
 def scan(root: str | Path = DEFAULT_ROOT) -> List[Recording]:
+    """Every recording with a mix under ``root`` (``<concert>/<recording>/``)."""
     root = Path(root)
     recs = []
     for concert in sorted(p for p in root.iterdir() if p.is_dir()):
@@ -141,6 +162,7 @@ def scan(root: str | Path = DEFAULT_ROOT) -> List[Recording]:
 
 
 def write_manifest(recs: List[Recording], path: str | Path) -> None:
+    """One CSV row per recording (see ``MANIFEST_HEADER``)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -156,17 +178,20 @@ def write_manifest(recs: List[Recording], path: str | Path) -> None:
 
 
 def read_manifest(path: str | Path) -> List[dict]:
+    """Rows of a manifest CSV as dicts."""
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
 def by_mbid(recs: List[Recording]) -> Dict[str, Recording]:
+    """Index recordings by MusicBrainz recording id."""
     return {r.mbid: r for r in recs}
 
 
 # ----------------------------------------------------------------------------- annotations
 
 def load_tonic(path: Path) -> float:
+    """Tonic in Hz from a ``.ctonic.txt`` file."""
     return float(Path(path).read_text().split()[0])
 
 
@@ -177,6 +202,7 @@ def load_pitch(path: Path) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def load_times(path: Path) -> np.ndarray:
+    """First column of a one-time-per-line file (sama) as an array."""
     vals = [float(line.split()[0]) for line in Path(path).read_text().splitlines() if line.strip()]
     return np.asarray(vals, dtype=np.float64)
 

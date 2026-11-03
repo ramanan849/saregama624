@@ -34,6 +34,12 @@ WRITE_SR = 44100         # stems are written at Saraga's native rate
 
 @dataclass
 class StemLag:
+    """Lag of one stem against the mix, from GCC-PHAT on many windows.
+
+    ``lag_s``: median lag of the windows whose PHAT peak is clear; ``iqr_ms``:
+    their spread (a stem whose windows agree within ``tight_ms`` is *tight*);
+    ``drift_ms_per_min``: slope of lag over time (clock drift; ~0 in Saraga).
+    """
     lag_s: float             # median lag over good windows
     iqr_ms: float            # spread of the window lags
     n_windows: int
@@ -43,23 +49,28 @@ class StemLag:
 
 @dataclass
 class SyncResult:
+    """Outcome of ``estimate_offsets``: the single offset applied to every
+    stem, the per-stem measurements, which stems formed the consensus, and
+    flags (``no_tight_stem``, ``tight_stems_disagree_*``, ``vocal_not_tight``).
+    """
     offset_s: float                              # applied to every stem
     stems: Dict[str, StemLag] = field(default_factory=dict)
     consensus_stems: List[str] = field(default_factory=list)
     flags: List[str] = field(default_factory=list)
 
     def to_json(self) -> dict:
+        """JSON-serialisable form, stored as ``ir.json['sync']``."""
         return {"offset_s": self.offset_s, "consensus_stems": self.consensus_stems,
                 "flags": self.flags, "stems": {k: asdict(v) for k, v in self.stems.items()}}
 
 
 def gcc_phat(a: np.ndarray, b: np.ndarray, max_lag: int):
     """Lag (samples) of ``a`` inside ``b`` and the PHAT peak-to-median ratio."""
-    n = 1 << int(np.ceil(np.log2(len(a) + len(b))))
-    x = np.fft.rfft(b, n) * np.conj(np.fft.rfft(a, n))
-    x /= np.abs(x) + 1e-9
+    n = 1 << int(np.ceil(np.log2(len(a) + len(b))))        # no circular wrap-around
+    x = np.fft.rfft(b, n) * np.conj(np.fft.rfft(a, n))     # cross-spectrum
+    x /= np.abs(x) + 1e-9                                  # PHAT: keep phase only -> sharp peak
     c = np.fft.irfft(x, n)
-    c = np.concatenate([c[-max_lag:], c[:max_lag + 1]])
+    c = np.concatenate([c[-max_lag:], c[:max_lag + 1]])    # lags -max_lag .. +max_lag
     k = int(np.argmax(c))
     return k - max_lag, float(c[k] / (np.median(np.abs(c)) + 1e-9))
 
@@ -67,6 +78,13 @@ def gcc_phat(a: np.ndarray, b: np.ndarray, max_lag: int):
 def stem_lag(stem: np.ndarray, mix: np.ndarray, sr: int = SYNC_SR, win_s: float = 10.0,
              step_s: float = 20.0, max_lag_s: float = 0.1, min_rms: float = 1e-3,
              min_quality: float = 8.0) -> StemLag:
+    """Measure ``stem``'s lag inside ``mix`` (both mono at ``sr``).
+
+    GCC-PHAT on ``win_s`` windows every ``step_s`` (the first and last step are
+    skipped: fades and count-ins).  Silent stem windows (RMS < ``min_rms``) and
+    windows whose correlation peak is not at least ``min_quality`` times the
+    median are ignored, which drops bleed-only stretches.
+    """
     n = min(len(stem), len(mix))
     win, step, max_lag = int(win_s * sr), int(step_s * sr), int(max_lag_s * sr)
     rows = []
@@ -79,7 +97,7 @@ def stem_lag(stem: np.ndarray, mix: np.ndarray, sr: int = SYNC_SR, win_s: float 
             rows.append((s0 / sr, lag / sr))
     if not rows:
         return StemLag(0.0, float("inf"), 0, 0.0, False)
-    t, lags = np.array(rows).T
+    t, lags = np.array(rows).T                             # window times, lags (s)
     iqr = float(np.subtract(*np.percentile(lags, [75, 25])) * 1000)
     drift = float(np.polyfit(t, lags, 1)[0] * 60 * 1000) if len(rows) > 3 else 0.0
     return StemLag(float(np.median(lags)), iqr, len(rows), drift, False)
@@ -87,6 +105,13 @@ def stem_lag(stem: np.ndarray, mix: np.ndarray, sr: int = SYNC_SR, win_s: float 
 
 def estimate_offsets(mix_path: Path, stem_paths: Dict[str, Path], tight_ms: float = 0.5,
                      agree_ms: float = 0.5) -> SyncResult:
+    """One offset for all stems of a recording.
+
+    Each stem is measured with ``stem_lag``; the offset is the median lag of the
+    tight melodic stems (``REFERENCE_STEMS``), else of any tight stem, else of
+    vocal/violin as they are (flagged).  ``agree_ms`` is the spread allowed
+    between the consensus stems before a disagreement flag is raised.
+    """
     mix = load_audio(mix_path, SYNC_SR)
     lags = {k: stem_lag(load_audio(p, SYNC_SR), mix) for k, p in stem_paths.items()}
     for v in lags.values():
@@ -111,6 +136,7 @@ def estimate_offsets(mix_path: Path, stem_paths: Dict[str, Path], tight_ms: floa
 def shift(x: np.ndarray, lag_s: float, sr: int, n_out: int) -> np.ndarray:
     """Delay ``x`` by ``lag_s`` (negative = advance) and fit it to ``n_out`` samples."""
     k = int(round(lag_s * sr))
+    # positive lag: prepend silence; negative: drop the stem's first -k samples
     y = np.concatenate([np.zeros(k, x.dtype), x]) if k >= 0 else x[-k:]
     if len(y) >= n_out:
         return y[:n_out]
@@ -130,7 +156,7 @@ def write_aligned_stems(mix_path: Path, stem_paths: Dict[str, Path], offset_s: f
         out[k] = out_dir / f"{k}.flac"
         sf.write(out[k], y, sr, subtype="PCM_16")
     if "mridangam-left" in cache and "mridangam-right" in cache:
-        y = cache["mridangam-left"] + cache["mridangam-right"]
+        y = cache["mridangam-left"] + cache["mridangam-right"]    # both heads, one stem
         peak = float(np.max(np.abs(y))) if len(y) else 0.0
         out["mridangam"] = out_dir / "mridangam.flac"
         sf.write(out["mridangam"], y / peak * 0.99 if peak > 0.99 else y, sr, subtype="PCM_16")
@@ -148,7 +174,7 @@ def bleed_scores(stems: Dict[str, Path], sr: int = 4000, hop_s: float = 0.05) ->
         x = load_audio(p, sr)
         n = len(x) // hop
         e = np.log(np.mean(x[:n * hop].reshape(n, hop) ** 2, axis=1) + 1e-8)
-        env[k] = (e - e.mean()) / (e.std() + 1e-9)
+        env[k] = (e - e.mean()) / (e.std() + 1e-9)        # z-scored, so the mean product is a correlation
     n = min(len(e) for e in env.values())
     return {a: {b: round(float(np.mean(env[a][:n] * env[b][:n])), 3) for b in env if b != a}
             for a in env}

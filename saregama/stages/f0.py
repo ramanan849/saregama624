@@ -24,6 +24,7 @@ import numpy as np
 
 from ..audio import FPS, HOP, SR, frame_signal, n_frames, resample
 from ..config import F0Cfg
+from ..paths import SOULX_REPO
 
 Track = Tuple[np.ndarray, np.ndarray]     # (f0 Hz with 0 = unvoiced, confidence 0..1)
 
@@ -34,6 +35,13 @@ Track = Tuple[np.ndarray, np.ndarray]     # (f0 Hz with 0 = unvoiced, confidence
 def yin(x: np.ndarray, sr: int = SR, fmin: float = 60.0, fmax: float = 1400.0,
         threshold: float = 0.15, n: Optional[int] = None,
         silence_db: float = -55.0, fps: float = FPS) -> Track:
+    """Pure-numpy YIN F0 tracker on frames centred at k / fps.
+
+    Uses the cumulative-mean-normalised difference with absolute threshold
+    ``threshold`` (first dip below it, walked to its local minimum, parabolic
+    interpolation).  Frames below ``silence_db`` or whose best dip is above 0.35
+    are unvoiced.  Returns (f0 Hz, confidence = 1 - dip).  Slow on long audio.
+    """
     hop = int(round(sr / fps))
     tau_min = max(2, int(sr / fmax))
     tau_max = int(np.ceil(sr / fmin))
@@ -116,6 +124,9 @@ class _Rmvpe:
     fit in GPU memory.  Confidence is the peak salience per frame."""
 
     def __init__(self, cfg: F0Cfg, soulx_repo: str, chunk_s: float = 30.0, ctx_s: float = 1.0):
+        """Load RMVPE from the SoulX clone; chunks are ``chunk_s`` long with
+        ``ctx_s`` of context on both sides (dropped after inference).
+        """
         repo = Path(soulx_repo).resolve()
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))
@@ -128,6 +139,9 @@ class _Rmvpe:
         self.ctx = int(ctx_s * NN_SR / NN_HOP)
 
     def salience(self, x16: np.ndarray) -> np.ndarray:
+        """RMVPE's 360-bin pitch salience at 100 frames/s for the whole signal,
+        computed chunk by chunk.
+        """
         total = len(x16) // NN_HOP + 1
         out = np.zeros((total, 360), dtype=np.float32)
         with self.torch.no_grad():
@@ -143,6 +157,9 @@ class _Rmvpe:
         return out
 
     def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        """F0 on ``n`` frames at ``fps``; at 100 fps the confidence is the
+        peak salience, otherwise just the voicing.
+        """
         sal = self.salience(x16)
         f = self.m.decode(sal, thred=self.thred).astype(np.float32)
         conf = sal.max(axis=1)
@@ -154,7 +171,9 @@ class _Rmvpe:
 
 
 class _Fcpe:
+    """torchfcpe, run in ``chunk_s`` chunks (no overlap needed: FCPE is local)."""
     def __init__(self, cfg: F0Cfg, chunk_s: float = 60.0):
+        """Load the bundled FCPE model on ``cfg.device``."""
         import torch
         from torchfcpe import spawn_bundled_infer_model  # type: ignore
         self.torch = torch
@@ -163,6 +182,7 @@ class _Fcpe:
         self.chunk = int(chunk_s * NN_SR / NN_HOP)
 
     def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        """F0 on ``n`` frames at ``fps``; confidence = voicing."""
         total = len(x16) // NN_HOP + 1
         f = np.zeros(total, dtype=np.float32)
         for f0 in range(0, total, self.chunk):
@@ -181,12 +201,15 @@ class _Fcpe:
 
 
 class _Crepe:
+    """torchcrepe ("full" model); frames with periodicity < 0.5 are unvoiced."""
     def __init__(self, cfg: F0Cfg):
+        """Keep the modules; torchcrepe loads its weights on first predict."""
         import torch
         import torchcrepe  # type: ignore
         self.torch, self.tc, self.cfg = torch, torchcrepe, cfg
 
     def __call__(self, x16: np.ndarray, n: int, fps: float) -> Track:
+        """F0 on ``n`` frames at ``fps``; confidence = voicing."""
         pitch, per = self.tc.predict(self.torch.from_numpy(x16).float()[None], NN_SR,
                                      hop_length=NN_HOP, fmin=self.cfg.fmin,
                                      fmax=self.cfg.fmax, model="full", batch_size=512,
@@ -199,6 +222,7 @@ class _Crepe:
 
 
 def _fit(a: np.ndarray, n: int) -> np.ndarray:
+    """Truncate or zero-pad ``a`` to exactly ``n`` values."""
     a = np.asarray(a).reshape(-1)
     return a[:n] if len(a) >= n else np.pad(a, (0, n - len(a)))
 
@@ -207,6 +231,7 @@ def _fit(a: np.ndarray, n: int) -> np.ndarray:
 # ensemble and repair
 # ---------------------------------------------------------------------------
 def to_cents(f0: np.ndarray, ref_hz: float = 440.0) -> np.ndarray:
+    """Cents above ``ref_hz`` (NaN where unvoiced)."""
     out = np.full(len(f0), np.nan)
     v = f0 > 0
     out[v] = 1200 * np.log2(f0[v] / ref_hz)
@@ -214,6 +239,7 @@ def to_cents(f0: np.ndarray, ref_hz: float = 440.0) -> np.ndarray:
 
 
 def from_cents(c: np.ndarray, ref_hz: float = 440.0) -> np.ndarray:
+    """Inverse of ``to_cents``; NaN becomes 0 Hz (unvoiced)."""
     out = np.zeros(len(c), dtype=np.float32)
     v = ~np.isnan(c)
     out[v] = ref_hz * 2 ** (c[v] / 1200)
@@ -222,6 +248,14 @@ def from_cents(c: np.ndarray, ref_hz: float = 440.0) -> np.ndarray:
 
 def ensemble(tracks: Dict[str, Track], order: List[str], agree_cents: float = 50.0
              ) -> Tuple[np.ndarray, np.ndarray]:
+    """Combine F0 tracks into one.
+
+    Every member is octave-aligned to the first (reference) backend frame by
+    frame, a frame is voiced when at least half of the members are (ties go to
+    the reference), and the value is the median in cents.  ``agree`` is the
+    share of voiced members within ``agree_cents`` of the median (or the
+    reference's confidence when there is only one member).
+    """
     names = [k for k in order if k in tracks]
     if not names:
         raise ValueError("no F0 tracks to combine")
@@ -250,6 +284,7 @@ def ensemble(tracks: Dict[str, Track], order: List[str], agree_cents: float = 50
 
 
 def _runs(mask: np.ndarray) -> List[Tuple[int, int]]:
+    """[(start, end)) index ranges where ``mask`` is True."""
     out, k, n = [], 0, len(mask)
     while k < n:
         if mask[k]:
@@ -294,6 +329,10 @@ def fix_octave_islands(f0: np.ndarray, max_island_frames: int) -> Tuple[np.ndarr
 
 
 def fill_short_gaps(f0: np.ndarray, max_gap: int, max_jump_cents: float = 300.0) -> np.ndarray:
+    """Interpolate (in cents) unvoiced gaps of at most ``max_gap`` frames
+    inside voiced runs, unless the pitch jumps more than ``max_jump_cents``
+    across the gap (a real break, not a dropout).
+    """
     if max_gap <= 0:
         return f0
     c = to_cents(f0)
@@ -309,8 +348,12 @@ def fill_short_gaps(f0: np.ndarray, max_gap: int, max_jump_cents: float = 300.0)
 class F0Estimator:
     """``fps`` sets the output grid: 50 for SoulX clips, 100 for the ICM-IR master."""
 
-    def __init__(self, cfg: F0Cfg, soulx_repo: str = "../SoulX-Singer", annotator=None,
+    def __init__(self, cfg: F0Cfg, soulx_repo: str = str(SOULX_REPO), annotator=None,
                  fps: float = FPS):
+        """Build the configured backends (``cfg.backends``, in order; the first
+        is the octave reference).  ``annotator`` is needed only for the
+        ``annotator`` backend.
+        """
         self.cfg = cfg
         self.fps = fps
         self.backends = {}
@@ -331,9 +374,16 @@ class F0Estimator:
                 raise ValueError(f"unknown f0 backend {name!r}")
 
     def n_frames(self, n_samples: int, sr: int) -> int:
+        """Frames covering ``n_samples`` at ``sr`` on this estimator's grid."""
         return int(np.ceil(n_samples / sr * self.fps))
 
     def __call__(self, vocals: np.ndarray, sr: int = SR) -> Dict[str, np.ndarray]:
+        """Run every backend and the ensemble on ``vocals`` (at ``sr``).
+
+        Returns ``f0`` (Hz, 0 = unvoiced), ``f0_agree``, ``octave_fixed_frames``,
+        and the raw per-backend ``tracks`` and ``conf``.  Octave islands are folded
+        back and very short dropouts filled; voiced frames are never smoothed.
+        """
         n = self.n_frames(len(vocals), sr)
         x16 = resample(vocals, sr, NN_SR)
         tracks = {k: fn(x16, n, self.fps) for k, fn in self.backends.items()}

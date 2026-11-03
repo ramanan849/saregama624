@@ -68,6 +68,9 @@ RAGAS: Dict[str, str] = {
 
 
 def raga_key(name: str) -> str:
+    """Normalised raga name for table lookup: no diacritics, lower case,
+    common transliteration variants folded (sh/s, aa/a, th/t, ...).
+    """
     s = unicodedata.normalize("NFKD", name)
     s = "".join(ch for ch in s if not unicodedata.combining(ch)).lower()
     s = s.replace("ṁ", "m").strip()
@@ -78,6 +81,9 @@ def raga_key(name: str) -> str:
 
 
 def raga_swaras(name: str) -> Optional[List[str]]:
+    """Pitch classes of raga ``name`` (``RAGAS``), or None if unknown.
+    Also tries each part of compound names ("Kamavardani/Pantuvarali").
+    """
     table = {raga_key(k).replace(" ", ""): v for k, v in RAGAS.items()}
     for part in [name] + [p.strip() for p in name.replace(";", "/").split("/")]:
         k = raga_key(part).replace(" ", "")
@@ -88,6 +94,14 @@ def raga_swaras(name: str) -> Optional[List[str]]:
 
 @dataclass
 class SwaraCfg:
+    """Thresholds of the swara segmentation (see the module docstring).
+
+    ``win_s`` / ``stable_range``: a frame is stable when the pitch range over the
+    window stays below this many cents; ``snap_cents``: how close to a
+    svarasthana a stable frame must be; ``refine_cents``: how far a position
+    may move to its histogram peak; ``hist_min_share``: minimum histogram mass
+    for a peak to count as a used swara when the raga is unknown.
+    """
     win_s: float = 0.1
     stable_range: float = 40.0
     snap_cents: float = 35.0
@@ -104,6 +118,7 @@ class SwaraCfg:
 
 @dataclass
 class Segment:
+    """One labelled piece of the contour; times in seconds on the mix clock."""
     start: float
     end: float
     kind: str                  # stable | glide | kampita | transit
@@ -116,6 +131,7 @@ class Segment:
 
 
 def _runs(mask: np.ndarray) -> List[Tuple[int, int]]:
+    """[(start, end)) index ranges where ``mask`` is True."""
     d = np.diff(np.concatenate([[0], mask.astype(np.int8), [0]]))
     return list(zip(np.where(d == 1)[0], np.where(d == -1)[0]))
 
@@ -130,6 +146,9 @@ def stable_histogram(cents: np.ndarray, cfg: SwaraCfg, fps: float) -> Tuple[np.n
 
 
 def stable_mask(cents: np.ndarray, cfg: SwaraCfg, fps: float) -> np.ndarray:
+    """Voiced frames whose pitch range over a ``win_s`` window is below
+    ``stable_range`` cents (computed with running max/min filters).
+    """
     v = ~np.isnan(cents)
     w = max(3, int(round(cfg.win_s * fps)))
     hi = maximum_filter1d(np.where(v, cents, -1e9), w, mode="nearest")
@@ -144,6 +163,8 @@ def swara_positions(cents: np.ndarray, raga: str, cfg: SwaraCfg, fps: float) -> 
     peaks = [i for i in range(240) if h[i] >= h[i - 1] and h[i] >= h[(i + 1) % 240] and h[i] > 0]
     pos = {}
     if allowed:
+        # known raga: move each nominal position to the strongest histogram peak
+        # within refine_cents (keeps e.g. a low Ga), or keep it nominal
         for pc in allowed:
             nom = PC_CENTS[pc]
             near = [i for i in peaks if abs((bins[i] - nom + 600) % 1200 - 600) <= cfg.refine_cents]
@@ -153,6 +174,8 @@ def swara_positions(cents: np.ndarray, raga: str, cfg: SwaraCfg, fps: float) -> 
             else:
                 pos[pc] = float(nom)
     else:
+        # unknown raga: every dominant local peak (max within +-refine_cents and
+        # enough mass) becomes the position of its nearest pitch class
         win = int(cfg.refine_cents // 5)
         for i in peaks:
             lo = [h[(i + d) % 240] for d in range(-win, win + 1)]
@@ -167,6 +190,7 @@ def swara_positions(cents: np.ndarray, raga: str, cfg: SwaraCfg, fps: float) -> 
 
 
 def swara_name(pc: str, octave: int) -> str:
+    """Swara with octave marks: ``.D`` (mandra), ``G``, ``S'`` (tara)."""
     return ("." * -octave if octave < 0 else "") + pc + ("'" * octave if octave > 0 else "")
 
 
@@ -183,6 +207,8 @@ def _nearest(c: float, positions: Dict[str, float]) -> Tuple[str, int, float]:
 
 def turning_points(c: np.ndarray, min_amp: float) -> List[int]:
     """Indices of the extrema between reversals of at least ``min_amp`` cents."""
+    # hysteresis: a turn is confirmed only once the pitch has moved min_amp back
+    # from the running extreme, so vibrato-scale jitter is not a turning point
     pts, direction, ext_i = [], 0, 0
     hi_i = lo_i = 0
     for k in range(1, len(c)):
@@ -244,7 +270,7 @@ def _movement(seg: np.ndarray, base: int, fps: float, cfg: "SwaraCfg") -> List[T
             long_enough = (e - s) / fps >= cfg.min_glide_s
             kinds[k] = "glide" if net >= cfg.meend_cents and long_enough else "transit"
     out: List[Tuple[int, int, str]] = []
-    for (s, e), kind in zip(pieces, kinds):
+    for (s, e), kind in zip(pieces, kinds):          # glides stay separate (one per meend)
         if out and out[-1][2] == kind and kind != "glide":
             out[-1] = (out[-1][0], base + e, kind)
         else:
@@ -254,6 +280,14 @@ def _movement(seg: np.ndarray, base: int, fps: float, cfg: "SwaraCfg") -> List[T
 
 def segment(cents: np.ndarray, raga: str, fps: float = 100.0, cfg: SwaraCfg = SwaraCfg()
             ) -> Tuple[List[Segment], Dict[str, float]]:
+    """Segment a tonic-relative cents track (NaN = unvoiced) into stable,
+    glide, kampita and transit pieces.
+
+    Stable frames are labelled with the nearest refined swara position (within
+    ``snap_cents``); runs of one label lasting ``min_stable_s`` become stable
+    segments, and the movement between them is split by ``_movement``.
+    Returns (segments, refined positions).
+    """
     positions = swara_positions(cents, raga, cfg, fps)
     v = ~np.isnan(cents)
     st = stable_mask(cents, cfg, fps)
@@ -320,6 +354,7 @@ def flatten(segs: List[Segment], n: int, positions: Dict[str, float], fps: float
 
 
 def summary(segs: List[Segment]) -> Dict[str, object]:
+    """Time share per segment kind, counts, and stable time per swara."""
     dur = lambda kind: sum(s.end - s.start for s in segs if s.kind == kind)
     total = sum(s.end - s.start for s in segs) or 1.0
     by_swara: Dict[str, float] = {}
@@ -335,5 +370,8 @@ def summary(segs: List[Segment]) -> Dict[str, object]:
 
 
 def to_json(segs: List[Segment], positions: Dict[str, float], raga: str) -> dict:
+    """``swaras.json`` content: raga, its swaras, refined positions, summary,
+    segments.
+    """
     return {"raga": raga, "raga_swaras": raga_swaras(raga), "positions_cents": positions,
             "summary": summary(segs), "segments": [asdict(s) for s in segs]}

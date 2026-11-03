@@ -19,6 +19,9 @@ from ..audio import SR, frame_signal, rms_db
 
 
 def quality_curves(x: np.ndarray, f0: np.ndarray) -> Dict[str, np.ndarray]:
+    """``energy_db``, ``hnr_db`` and ``h1h2_db`` curves (one value per F0 frame;
+    HNR and H1-H2 are NaN where unvoiced).
+    """
     n = len(f0)
     energy = rms_db(x, win=960)[:n]
     energy = np.pad(energy, (0, n - len(energy)), constant_values=energy[-1] if len(energy) else -100)
@@ -42,6 +45,7 @@ def quality_curves(x: np.ndarray, f0: np.ndarray) -> Dict[str, np.ndarray]:
         hnr[voiced] = np.clip(10 * np.log10(r / (1 - r)), -10, 40)
 
         def harmonic_db(mult):
+            """Level (dB) of harmonic ``mult`` of the F0 at every voiced frame."""
             centre = f0[voiced] * mult / df
             lo = np.clip(np.floor(centre * 0.9).astype(int), 1, spec.shape[1] - 2)
             hi = np.clip(np.ceil(centre * 1.1).astype(int) + 1, 2, spec.shape[1] - 1)

@@ -45,15 +45,18 @@ SOULX_PHONESET = os.environ.get("SOULX_PHONE_SET", "")
 
 
 class OracleEmitter(Emitter):
+    """Emitter returning the oracle emissions prepared by the test (no model)."""
     unit = "roman"
 
     def __init__(self):
+        """Start with no emissions; the test sets them per song."""
         self.vocab = MMS_LIKE_VOCAB
         self.blank = MMS_LIKE_VOCAB["-"]
         self.star_id = MMS_LIKE_VOCAB["*"]
 
 
 def build_workspace(tmp: Path):
+    """Create a songs.csv workspace of synthetic songs under ``tmp``."""
     rows, synths = [], {}
     for k, (sid, lang, lines, tonic) in enumerate(SONGS):
         s = synth_song(sid, lang, lines, tonic, seed=k)
@@ -106,6 +109,7 @@ def soulx_preprocess_reference(meta: dict, phone2idx: dict, sr=SR, hop=HOP):
 
 
 def test_end_to_end():
+    """Legacy pipeline on synthetic songs: annotations, export, SoulX preprocessing."""
     tmp = Path(tempfile.mkdtemp(prefix="svs_e2e_"))
     try:
         synths = build_workspace(tmp)
@@ -211,6 +215,7 @@ def test_end_to_end():
 
 
 def test_g2p_examples():
+    """Hindi, Marathi and Tamil G2P give the expected syllables and phones."""
     from saregama.g2p import line_to_syllables
     got = {s.text: "-".join(s.phones) for s in line_to_syllables("कमला बचपन सत्य मैं", "hi")}
     assert got == {"कम": "k-a-m", "ला": "l-aa", "बच": "b-a-c", "पन": "p-a-n",

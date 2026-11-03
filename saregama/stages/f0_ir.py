@@ -15,8 +15,15 @@ estimate and their fifth/fourth relatives (Saraga's ctonic is sometimes Pa: it
 jumps by a fifth between recordings of one concert) by how well each explains
 the stable pitches of the raga; its octave is placed just below the singer's
 median pitch.
-QC compares against Saraga's own pitch track; that track is mix-based and its
-timestamps lead the mix clock by ~13 ms, so the lag is searched, not assumed.
+QC compares against each of Saraga's own pitch tracks (``pitch-vocal`` and the
+mix-based ``pitch``) separately.  Their timestamps can lead the mix clock by up
+to ~15 ms, so the lag is searched, not assumed; some ``pitch-vocal`` files
+belong to another recording (wrong length) and are skipped; the mix-based track
+often follows the violin, so a low score there is not an error of ours.
+Against valid vocal tracks the pilot agrees 95-98 % within 50 cents.
+
+``concert_consensus`` / ``apply_tonic`` implement the ``tonic-consensus``
+command: one Sa pitch class per concert.
 """
 from __future__ import annotations
 
@@ -33,6 +40,9 @@ TONIC_MARGIN = 0.05           # top-2 candidate scores closer than this -> revie
 
 
 def energy_db(x: np.ndarray, sr: int, n: int, fps: float = F0_HZ, win_s: float = 0.02) -> np.ndarray:
+    """RMS level in dB of ``x`` over ``win_s`` windows starting at frame k / fps
+    (``n`` frames), via a cumulative sum so hour-long stems are cheap.
+    """
     hop = sr / fps
     w = int(win_s * sr)
     xp = np.pad(x.astype(np.float64), (w // 2, w + int(hop) + 1))
@@ -102,7 +112,7 @@ def choose_tonic(f0: np.ndarray, saraga_tonic: Optional[float], raga: str = ""
     return snap_to_tonic_octave(best["tonic_hz"], f0), best["source"], cands
 
 
-REF_LENGTH_TOL_S = 2.0
+REF_LENGTH_TOL_S = 2.0        # a Saraga pitch track longer/shorter than this is another file
 
 
 def saraga_qc(f0: np.ndarray, refs: dict, fps: float = F0_HZ) -> dict:
@@ -119,6 +129,14 @@ def saraga_qc(f0: np.ndarray, refs: dict, fps: float = F0_HZ) -> dict:
 
 
 def run_f0(b: Bundle, est: F0Estimator, saraga_refs: Optional[dict] = None) -> dict:
+    """Stage ``f0`` for one bundle.
+
+    For ``vocal_clean`` (and ``vocal-s_clean`` in duos): run the ensemble, choose
+    the tonic (lead vocal only; flags ``tonic_ambiguous`` when the top two
+    candidates score within ``TONIC_MARGIN``), write ``f0_100hz[ _vocal-s].npz``
+    and score the F0 against Saraga's tracks when ``saraga_refs`` is given.
+    Returns the per-stem QC report, also stored as ``ir.json['qc']['f0']``.
+    """
     ir = b.load()
     report = {}
     for stem, suffix in (("vocal_clean", ""), ("vocal-s_clean", "_vocal-s")):

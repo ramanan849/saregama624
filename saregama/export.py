@@ -62,6 +62,9 @@ DATA_PROCESSOR_PATCH = '''--- a/soulxsinger/utils/data_processor.py
 
 @dataclass
 class Clip:
+    """A training clip: song, [a, b) frames and its notes (clipped to the range);
+    ``long`` when no rest allowed cutting it below the maximum length.
+    """
     song: SongAnnotation
     a: int                     # first frame
     b: int                     # end frame (exclusive)
@@ -70,6 +73,7 @@ class Clip:
 
 
 def _fmt(arr: Iterable[float], nd: int = 1) -> str:
+    """Space-separated numbers with ``nd`` decimals (non-finite -> 0), SoulX style."""
     return " ".join(f"{(0.0 if not np.isfinite(x) else x):.{nd}f}" for x in arr)
 
 
@@ -102,6 +106,7 @@ def plan_clips(ann: SongAnnotation, cfg: Config) -> List[Clip]:
         i = j
 
     def span(p):
+        """Frames from the first note of phrase ``p`` to its last note's end."""
         return notes[p[1] - 1].end - notes[p[0]].start
 
     # greedily merge consecutive phrases while the clip stays <= max
@@ -142,6 +147,10 @@ def plan_clips(ann: SongAnnotation, cfg: Config) -> List[Clip]:
 
 
 def clip_item(clip: Clip, clip_id: str, wav_rel: str) -> Dict:
+    """SoulX-Singer metadata item of one clip: per-note text, phoneme string,
+    MIDI pitch, type and duration, plus the clip's F0 and the Indic extras
+    (tonic, note cents, swara).
+    """
     ann = clip.song
     a, b = clip.a, clip.b
     sy = ann.syllables
@@ -195,6 +204,7 @@ def clip_item(clip: Clip, clip_id: str, wav_rel: str) -> Dict:
 
 
 def _exclusion_reason(clip: Clip, policy: str) -> Optional[str]:
+    """Why a clip must not be exported (unlabelled vocalise, no singing), or None."""
     for n in clip.notes:
         if n.type == NOTE_REST:
             continue
@@ -229,6 +239,12 @@ def assign_splits(songs: List[SongAnnotation], val_frac: float = 0.03, seed: int
 def export_dataset(cfg: Config, include_status=("auto", "reviewed", "gold"),
                    soulx_phone_set: Optional[str] = None, val_frac: float = 0.03,
                    holdout_singers: Iterable[str] = ()) -> Dict:
+    """Cut every included song into clips and write the wavs, train / val /
+    test metadata (.jsonl and .json), ``excluded.jsonl``, ``stats.json`` /
+    ``stats.md`` and ``soulx/`` (embedding-init map, DataProcessor patch, and
+    the extended phone set when ``soulx_phone_set`` is given).  Returns hours,
+    clip counts and the number excluded.
+    """
     work = Path(cfg.work_dir)
     out = Path(cfg.out_dir)
     (out / "wavs").mkdir(parents=True, exist_ok=True)
@@ -298,6 +314,7 @@ def export_dataset(cfg: Config, include_status=("auto", "reviewed", "gold"),
 
 
 def _write_stats_md(path: Path, hours: Dict[str, float], clips: Dict[str, int], n_excl: int) -> None:
+    """Hours per group and singers per language as a Markdown table."""
     lines = ["# Dataset statistics", "", f"Clips: {clips}; excluded items: {n_excl}", "",
              "| Group | Hours |", "| --- | --- |"]
     for k, v in hours.items():

@@ -25,6 +25,13 @@ sequence instead:
 Matched spikes timestamp their letters; syllable onsets come from their first
 matched letter (unmatched syllables are interpolated between neighbours) and
 :func:`align_kriti.extend_sustain` then extends them through voicing.
+
+Instances with fewer than ``min_matches`` matched letters are dropped (sargam
+syllables only need their consonant), and those matching less than
+``min_match_frac`` of the letters they span are flagged ``low_conf``.  Every
+instance carries ``matched_X_of_Y`` (matched letters / letters in the line).
+On the pilot this aligns 160-450 s of lyrics per recording and finds 79-188
+sargam syllables per kalpana svara; it is not yet measured against hand labels.
 """
 from __future__ import annotations
 
@@ -41,6 +48,9 @@ VOWELS = set("aeiou")
 
 @dataclass
 class SpikeCfg:
+    """Scores of the spike DP (log domain; bonuses positive, costs negative).
+    Defaults were tuned by eye on the pilot; see the module docstring.
+    """
     bonus_cons: float = 2.5       # reward for matching a consonant ...
     bonus_vowel: float = 1.0      # ... and a vowel (vowels are everywhere in melisma)
     del_cost: float = -0.7        # per lyric letter skipped
@@ -61,6 +71,7 @@ class SpikeCfg:
 
 @dataclass
 class Spikes:
+    """The non-blank events of a region: one row per run of a non-blank argmax."""
     t: np.ndarray                 # (N,) time of the spike (s)
     rel: np.ndarray               # (N, C) log p(letter | non-blank)
     top: np.ndarray               # (N,) argmax letter column
@@ -68,6 +79,13 @@ class Spikes:
 
 
 def spikes(logp: np.ndarray, blank: int, inv: Dict[int, str], t0: float = 0.0) -> Spikes:
+    """Collapse MMS log-probabilities to spikes.
+
+    Each run of frames whose argmax is the same non-blank letter becomes one
+    spike at its most confident frame, with the distribution renormalised over
+    non-blank letters (blank dominates singing, so raw letter log-probs would
+    mostly measure "how blank", not "which letter").
+    """
     am = logp.argmax(axis=1)
     k, rows, times = 0, [], []
     T = len(am)
@@ -75,12 +93,12 @@ def spikes(logp: np.ndarray, blank: int, inv: Dict[int, str], t0: float = 0.0) -
         if am[k] == blank:
             k += 1
             continue
-        j = k
+        j = k                                            # [k, j): one run of the same letter
         while j < T and am[j] == am[k]:
             j += 1
         f = k + int(np.argmax(logp[k:j, am[k]]))
         p = np.exp(logp[f])
-        nb = max(1e-6, 1.0 - p[blank])
+        nb = max(1e-6, 1.0 - p[blank])                   # mass of all non-blank outputs
         rel = np.log(np.maximum(p / nb, 1e-8))
         rel[blank] = NEG
         rows.append(rel)
@@ -272,8 +290,9 @@ def instances_from_spikes(sp: Spikes, assign: np.ndarray, a_line: np.ndarray, g:
         keys = [k for k in keys if not (k[0] == w0 and k[1] < g.syl[st[0]]) and
                 not (k[0] == w1 and k[1] > g.syl[st[-1]])]
         known = [i for i, k in enumerate(keys) if k in syl_on]
+        # syllables without a matched letter get onsets interpolated between neighbours
         on = np.interp(np.arange(len(keys)), known, [syl_on[keys[i]] for i in known])
-        on = np.maximum.accumulate(on)
+        on = np.maximum.accumulate(on)                   # onsets never go backwards
         end_t = float(times[-1]) + 1.0 / FPS_EMIT
         words: List[WordSpan] = []
         for i, (w, s) in enumerate(keys):
@@ -297,6 +316,14 @@ def instances_from_spikes(sp: Spikes, assign: np.ndarray, a_line: np.ndarray, g:
 
 def align_regions_spikes(logp: np.ndarray, lines: List[Line], regions: List[dict], vocab: Dict[str, int],
                          blank: int, cfg: SpikeCfg) -> Tuple[List[Instance], List[dict]]:
+    """Align every Saraga section region separately with the spike DP.
+
+    The region's label decides the allowed lines (``region_lines``): no lyrics
+    (alapana, tani, ...), lyric lines of that section plus the returning
+    pallavi, or, in kalpana svara, all lines plus the sargam pseudo-lines.
+    Returns all instances and a per-region report (spikes, matched, sargam,
+    seconds of lyrics).
+    """
     inv = {i: c for c, i in vocab.items()}
     g = build_graph(lines, vocab, blank)
     lines_sw = with_sargam(lines)

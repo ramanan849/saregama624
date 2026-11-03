@@ -52,6 +52,9 @@ def _edit_align(a: Sequence, b: Sequence) -> Tuple[int, List[Tuple[int, int]]]:
 
 
 def compare(pred: SongAnnotation, gold: SongAnnotation) -> Dict:
+    """Metrics of one predicted song against its gold version (see the module
+    docstring for the list).
+    """
     r: Dict = {"song_id": gold.song_id}
     # syllables / phones
     gs = [s for s in gold.syllables if "vocalise" not in s.flags or "akaar" in s.flags]
@@ -90,6 +93,7 @@ def compare(pred: SongAnnotation, gold: SongAnnotation) -> Dict:
         r["tonic_correct"] = bool(abs(c) < 25)
     # notes
     def frame_types(a: SongAnnotation, n: int) -> np.ndarray:
+        """Per-frame note type (0 = no note) of an annotation."""
         t = np.zeros(n, dtype=int)
         for x in a.notes:
             t[x.start:min(x.end, n)] = x.type
@@ -113,6 +117,9 @@ def compare(pred: SongAnnotation, gold: SongAnnotation) -> Dict:
 
 
 def evaluate(pred_dir: str | Path, gold_dir: str | Path, out_json: Optional[str] = None) -> Dict:
+    """``compare`` every gold song that also has a prediction; returns per-song
+    rows and a summary (means / medians), optionally written to ``out_json``.
+    """
     pred_dir, gold_dir = Path(pred_dir), Path(gold_dir)
     rows = []
     for gd in sorted(gold_dir.glob("*")):
@@ -126,6 +133,7 @@ def evaluate(pred_dir: str | Path, gold_dir: str | Path, out_json: Optional[str]
     summary: Dict = {"songs": len(rows)}
     if rows:
         def agg(key, fn=np.mean):
+            """Aggregate ``key`` over the rows that have it, or None."""
             v = [r[key] for r in rows if r.get(key) is not None]
             return float(fn(v)) if v else None
         summary.update({

@@ -8,7 +8,12 @@ most film music, so the fifth term separates Sa from a strong Ga or Pa.
 
 The octave is chosen so that Sa sits at or just below the singer's median pitch
 (madhya saptak).  Known tonics (from liner notes or the reviewer) override this;
-pass them in songs.csv.  For film songs "tonic" simply means the key centre.
+in the legacy workspace pass them in songs.csv.  For film songs "tonic" simply
+means the key centre.
+
+The Saraga pipeline uses ``estimate_tonic`` only as one candidate source and
+``snap_to_tonic_octave`` for octave placement; the choice itself is
+``stages.f0_ir.choose_tonic`` (raga-aware) plus the concert consensus.
 """
 from __future__ import annotations
 
@@ -24,6 +29,11 @@ REF = 55.0                    # A1, arbitrary reference for pitch classes
 
 def pitch_class_histogram(f0: np.ndarray, weights: Optional[np.ndarray] = None,
                           stable_only: bool = True) -> np.ndarray:
+    """Octave-folded histogram of voiced F0 (``BIN``-cent bins relative to
+    ``REF``), optionally weighted, smoothed circularly.  With ``stable_only``
+    frames whose pitch moves more than 20 cents per frame are left out, so
+    held Sa / Pa dominate and glides do not.
+    """
     v = f0 > 0
     c = 1200 * np.log2(f0[v] / REF)
     w = np.ones_like(c) if weights is None else np.asarray(weights)[v]

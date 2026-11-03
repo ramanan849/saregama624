@@ -19,6 +19,13 @@ models = [
   "librosa>=0.10",
   "einops",
   "huggingface_hub",
+  # imported by SoulX-Singer's Mel-RoFormer separator (stage `stems`)
+  "ml_collections",
+  "omegaconf",
+  "rotary_embedding_torch",
+  "beartype",
+  "loralib",
+  "wandb",
 ]
 web = ["requests", "beautifulsoup4"]
 test = ["pytest"]

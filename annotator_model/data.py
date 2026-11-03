@@ -1,5 +1,5 @@
 """Training data for the unified annotator, read from an exported dataset
-(``svs-annotate export``): every clip already has wav + f0 + notes + phonemes.
+(``saregama export``): every clip already has wav + f0 + notes + phonemes.
 
 Sample weights follow how much a human has checked the labels:
 gold 1.0, reviewed 1.0, auto 0.5, flagged 0.25.  This is what makes the
@@ -24,7 +24,11 @@ STATUS_WEIGHT = {"gold": 1.0, "reviewed": 1.0, "auto": 0.5, "flagged": 0.25}
 
 
 class ClipDataset(Dataset):
+    """Exported SoulX clips (``<split>.jsonl`` + wavs) as training examples for
+    the annotator: audio, F0, phone ids, onsets and note types per frame.
+    """
     def __init__(self, dataset_dir: str, splits=("train",), statuses=("gold", "reviewed", "auto")):
+        """Items of ``splits`` whose annotation status is in ``statuses``."""
         self.root = Path(dataset_dir)
         self.items: List[Dict] = []
         for sp in splits:
@@ -37,9 +41,11 @@ class ClipDataset(Dataset):
                     self.items.append(it)
 
     def __len__(self):
+        """Number of clips."""
         return len(self.items)
 
     def __getitem__(self, i):
+        """Tensors of clip ``i`` (16 kHz audio and 50 fps targets)."""
         it = self.items[i]
         wav = load_audio(self.root / it["wav"], SR)
         wav16 = resample(wav, SR, SR_IN)
@@ -72,6 +78,7 @@ class ClipDataset(Dataset):
 
 
 def collate(batch: List[Dict]) -> Dict[str, torch.Tensor]:
+    """Pad a batch to its longest clip; adds frame masks and lengths for CTC."""
     B = len(batch)
     T = max(b["n_frames"] for b in batch)
     S = max(len(b["wav16"]) for b in batch)
