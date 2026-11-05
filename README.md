@@ -814,6 +814,26 @@ which step 8 will adapt:
 `stages/{align,lyrics,notes,quality,qc}.py`, `annotator_model/` (optional unified
 annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 
+**Pitch-contour sargam report for a film song** (same layout as
+`files_and_context/pitch_contour_sargam.pdf`):
+
+    saregama --config config.toml contour --out work/contours \
+        --titles "hi_film_chupke=Chupke Se;hi_film_gehrahua=Gehra Hua"
+
+writes `<id>_pitch_contour_sargam.pdf` per song (`viz.song_contour_pdf` →
+`viz.sargam_report_pdf`):
+- **Page 1:** the whole contour in Hz on a log axis, with swara gridlines (dot
+  below = mandra, dot above = tara) and meend bands (glides of 150 cents or more),
+  plus the share of sustained time per swara.
+- **Then one 30 s window per page:** sustained swaras (0.25 s or longer) as
+  labelled red bars, meend bands, and the aligned lyric words romanised along the
+  bottom (`L<n>:` marks a line start).
+- **Where Sa and the swaras come from:** Sa is the song's automatic tonic. Film
+  songs have no raga, so the gridlines are the pitch-histogram peaks (lower case =
+  komal, `M` = tivra).
+- **Side files:** `<stem>.f0.npz` (cents at 50 fps) and `<stem>.swaras.json` are
+  written next to each PDF.
+
 ## Conventions
 
 - **One clock.** Every time is seconds on the mix clock. Stems are shifted onto it
@@ -849,6 +869,7 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_varnam_eval.py` | structure parsing with repeated keys, tick spans, notation on ticks, scoring |
 | `test_gold_eval.py` | syllable matching, instance P/R, sections, sama, the review-import snapshot |
 | `test_report.py` | report rows, missing-stage reasons, outliers, grouping, HTML escaping; one-vote-per-recording tonic consensus |
+| `test_viz.py` | film-song contour report: cents from Hz, words grouped per line, PDF pages |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |

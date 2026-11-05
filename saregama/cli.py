@@ -36,7 +36,7 @@ the locations in :mod:`saregama.paths`.
 Legacy film-song workspace (songs.csv; ported from indic-svs-annotator):
 ``init``, ``run``, ``draft-lyrics``, ``export-review``, ``audit``,
 ``import-review``, ``make-eval-csv``, ``evaluate``, ``export``, ``stats``,
-``phoneset``, ``g2p``.
+``phoneset``, ``g2p``, ``contour`` (pitch-contour sargam PDF per song).
 """
 from __future__ import annotations
 
@@ -150,6 +150,22 @@ def cmd_export_review(a):
     ids = a.songs.split(",") if a.songs else None
     done = export_review(cfg, ids, tuple(a.status.split(",")))
     print(f"exported {len(done)} songs for review into {Path(cfg.work_dir) / 'review'}")
+
+
+def cmd_contour(a):
+    """``contour``: pitch-contour sargam PDF per legacy song (``--songs`` ids,
+    default all annotated), written to ``--out/<id>_pitch_contour_sargam.pdf``;
+    ``--titles "id=Title;..."`` sets the page titles.
+    """
+    from .viz import song_contour_pdf
+    cfg = _cfg(a)
+    root = Path(cfg.work_dir) / "songs"
+    ids = a.songs.split(",") if a.songs else sorted(d.name for d in root.glob("*") if (d / "annotation.json").exists())
+    titles = dict(x.split("=", 1) for x in a.titles.split(";") if "=" in x)     # "id=Title;id2=Title 2"
+    for sid in ids:
+        out = song_contour_pdf(root / sid, Path(a.out) / f"{sid}_pitch_contour_sargam.pdf",
+                               title=titles.get(sid, sid))
+        print(f"{sid}: {out}", flush=True)
 
 
 def cmd_audit(a):
@@ -1414,6 +1430,12 @@ def main(argv=None):
     s.add_argument("--songs", default="", help="comma-separated ids (default: by status)")
     s.add_argument("--status", default="flagged")
     s.set_defaults(fn=cmd_export_review)
+
+    s = sub.add_parser("contour", help="pitch-contour sargam PDF per song")
+    s.add_argument("--songs", default="", help="comma-separated ids (default: all annotated)")
+    s.add_argument("--out", default="contours")
+    s.add_argument("--titles", default="", help='page titles, "id=Title;id2=Title 2"')
+    s.set_defaults(fn=cmd_contour)
 
     s = sub.add_parser("audit", help="export a random sample of auto-accepted songs for review")
     s.add_argument("--fraction", type=float, default=0.02)
