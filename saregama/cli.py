@@ -25,6 +25,8 @@ redoes recordings already done):
     review-import     read corrected layers back, mark reviewed
     export-ir         ICM-IR v0 dataset: parquet tables + 100 Hz frames
     export-soulx      SoulX-Singer training clips (melody mode)
+    report            dataset QC report: report.csv + report.html
+    svc-check         SoulX SVC rendering check: does its F0 input keep gamakas? (GPU)
 
 Global options ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` default to
 the locations in :mod:`saregama.paths`.
@@ -1092,7 +1094,16 @@ def cmd_review_import(a):
 
 def cmd_tonic_consensus(a):
     """Enforce one Sa per concert: recordings whose tonic pitch class is off the
-    concert consensus get the consensus (octave placed per recording)."""
+    concert consensus get the consensus (octave placed per recording).
+
+    Voting: one vote per recording, not weighted by duration (a single long
+    recording with a weak tonic guess must not outvote several confident ones).
+    Our raga-aware tonics vote twice; Saraga's ctonic of the concert's other
+    recordings votes once.  A recording always votes with its own estimate
+    (``tonic_recording_hz`` once a previous run replaced it), so re-runs don't
+    feed on their own output, and a recording moved by an earlier run whose own
+    estimate agrees with the new consensus gets its own tonic back.
+    """
     import numpy as np
     from collections import defaultdict
     from .ir import Bundle
@@ -1107,32 +1118,144 @@ def cmd_tonic_consensus(a):
     saraga_votes = defaultdict(list)                       # every recording of the concert votes
     for r in scan(a.saraga_root):
         if r.tonic():
-            saraga_votes[r.concert].append((r.mbid, r.tonic(), r.length_s))
+            saraga_votes[r.concert].append((r.mbid, r.tonic(), 1.0))
+
+    def own(ir):
+        """The recording's own tonic estimate, before any consensus replaced it."""
+        return ir.get("tonic_recording_hz") or ir["tonic_hz"]
+
     for concert, items in by_concert.items():
-        # our (raga-aware) tonics vote with double weight; Saraga's ctonic of every
-        # other recording of the concert votes once, weighted by duration
-        ours = {r.mbid: (r.mbid, b.load()["tonic_hz"], 2 * r.length_s) for r, b in items}
+        ours = {r.mbid: (r.mbid, own(b.load()), 2.0) for r, b in items}
         votes = list(ours.values()) + [v for v in saraga_votes[concert] if v[0] not in ours]
         ref = concert_consensus(votes)
         ref = ref / 2 ** np.floor(np.log2(ref / 100.0))     # print in 100-200 Hz
         for r, b in items:
             ir = b.load()
-            off = (1200 * np.log2(ir["tonic_hz"] / ref) + 600) % 1200 - 600
-            if abs(off) <= a.tol:
+            mine = own(ir)
+            off = (1200 * np.log2(mine / ref) + 600) % 1200 - 600
+            moved = "tonic_recording_hz" in ir
+            if abs(off) <= a.tol and not moved:
                 continue
-            f0 = np.load(b.path("f0_100hz.npz"))["f0_hz"]
-            new = snap_to_tonic_octave(ref, f0)
-            print(f"{concert[:30]} | {r.title}: {ir['tonic_hz']} -> {new:.3f} Hz (off {off:+.0f} c)", flush=True)
+            if abs(off) <= a.tol:                             # an earlier run moved it; undo
+                new, src = mine, ir.get("tonic_recording_source", "recording")
+                print(f"{concert[:30]} | {r.title}: {ir['tonic_hz']} -> {new:.3f} Hz (own estimate restored)",
+                      flush=True)
+            else:
+                f0 = np.load(b.path("f0_100hz.npz"))["f0_hz"]
+                new, src = snap_to_tonic_octave(ref, f0), "concert_consensus"
+                if abs(1200 * np.log2(new / ir["tonic_hz"])) < 5:
+                    continue                                  # already on this consensus (within 5 c)
+                print(f"{concert[:30]} | {r.title}: {ir['tonic_hz']} -> {new:.3f} Hz (off {off:+.0f} c)", flush=True)
             if a.dry_run:
                 continue
-            ir["flags"] = sorted(set(ir.get("flags", [])) | {"tonic_from_concert"})
-            ir["tonic_recording_hz"] = ir["tonic_hz"]
+            if src == "concert_consensus":
+                ir["flags"] = sorted(set(ir.get("flags", [])) | {"tonic_from_concert"})
+                ir.setdefault("tonic_recording_hz", ir["tonic_hz"])
+                ir.setdefault("tonic_recording_source", ir.get("tonic_source", ""))
+            else:
+                ir["flags"] = sorted(set(ir.get("flags", [])) - {"tonic_from_concert"})
+                ir.pop("tonic_recording_hz", None)
+                ir.pop("tonic_recording_source", None)
             b.save(ir)
-            apply_tonic(b, new, "concert_consensus")
+            apply_tonic(b, new, src)
             ir = b.load()
             ir.get("stages", {}).pop("swaras", None)       # swaras depend on the tonic
             b.save(ir)
         print(f"{concert[:30]}: Sa pitch class {ref:.2f} Hz ({len(votes)} votes)", flush=True)
+
+
+def cmd_report(a):
+    """``report``: per-recording QC table (``report.csv``) and one HTML page
+    (``report.html``) with stage completion, hours by raga / singer / form and
+    outliers, written to ``--out``."""
+    from datetime import datetime
+    from .report import write_report
+    rows = write_report(Path(a.ann_root), Path(a.lyrics_dir), Path(a.out),
+                        generated=datetime.now().strftime("%Y-%m-%d %H:%M"))
+    print(f"{len(rows)} recordings -> {Path(a.out) / 'report.html'}, {Path(a.out) / 'report.csv'}")
+
+
+def cmd_svc_check(a):
+    """``svc-check``: render probe phrases with SoulX-Singer's SVC model following
+    our F0, re-measure the output's F0 and score it (see :mod:`saregama.svc_check`).
+
+    Writes ``<out>/<i>_{target,prompt,generated}.wav`` (24 kHz), ``results.jsonl``
+    (phrases and metrics) and ``summary.json`` (medians over phrases).
+    """
+    import os
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from .audio import resample
+    from .config import F0Cfg
+    from .ir import Bundle
+    from .paths import SOULX_REPO
+    from .stages.f0 import F0Estimator
+    from .svc_check import (SOULX_FPS, PhraseCfg, at_50fps, contour_metrics, pick_phrases, quantise_like_soulx,
+                            summarise)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    recs = []
+    for r in _saraga_recs(a):
+        b = Bundle(a.ann_root, r.mbid)
+        if not b.stage_done("f0"):
+            continue
+        ir = b.load()
+        recs.append({"mbid": r.mbid, "title": ir["title"], "raga": ir.get("raaga") or "?",
+                     "singer": (ir.get("lead") or ["?"])[0], "tonic_hz": ir["tonic_hz"],
+                     "f0": np.load(b.path("f0_100hz.npz"))["f0_hz"]})
+    phrases = pick_phrases(recs, PhraseCfg(n=a.n, dur=a.dur, prompt_s=a.prompt_s))
+    print(f"{len(phrases)} phrases from {len({p['raga'] for p in phrases})} ragas", flush=True)
+
+    sys.path.insert(0, str(SOULX_REPO))
+    from cli.inference_svc import build_model                       # SoulX-Singer repo
+    from soulxsinger.utils.file_utils import load_config
+    cwd = os.getcwd()
+    os.chdir(SOULX_REPO)                                             # the SoulX config uses repo-relative paths
+    try:
+        config = load_config(str(SOULX_REPO / "soulxsinger/config/soulxsinger.yaml"))
+        model = build_model(a.model or str(SOULX_REPO / "pretrained_models/SoulX-Singer/model-svc.pt"),
+                            config, device=a.device, use_fp16=False)
+    finally:
+        os.chdir(cwd)
+    sr = int(config.audio.sample_rate)
+    est = F0Estimator(F0Cfg(backends=["rmvpe", "fcpe", "crepe"], device=a.device), fps=SOULX_FPS)
+    rows = []
+    with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
+        for i, p in enumerate(phrases, 1):
+            b = Bundle(a.ann_root, p["mbid"])
+            wav, wsr = sf.read(b.path("stems/vocal_clean.flac"), dtype="float32", always_2d=True)
+            wav = wav.mean(axis=1)
+
+            def cut(t0, dur):
+                """``dur`` seconds of the vocal from ``t0``, at SoulX's rate."""
+                return resample(wav[int(t0 * wsr):int((t0 + dur) * wsr)], wsr, sr)
+
+            tgt, pmt = cut(p["target_start"], p["dur"]), cut(p["prompt_start"], p["prompt_s"])
+            f0 = np.load(b.path("f0_100hz.npz"))["f0_hz"]
+            tgt_f0 = at_50fps(f0[int(p["target_start"] * 100):int((p["target_start"] + p["dur"]) * 100)])
+            pmt_f0 = at_50fps(f0[int(p["prompt_start"] * 100):int((p["prompt_start"] + p["prompt_s"]) * 100)])
+            dev = a.device
+            with torch.no_grad():
+                gen, _ = model.infer(pt_wav=torch.from_numpy(pmt)[None].to(dev),
+                                     gt_wav=torch.from_numpy(tgt)[None].to(dev),
+                                     pt_f0=torch.from_numpy(pmt_f0)[None].to(dev),
+                                     gt_f0=torch.from_numpy(tgt_f0)[None].to(dev),
+                                     auto_shift=False, pitch_shift=0, n_steps=a.n_steps, cfg=a.cfg)
+            gen = gen.squeeze().float().cpu().numpy()
+            for name, x in (("target", tgt), ("prompt", pmt), ("generated", gen)):
+                sf.write(out / f"{i:02d}_{name}.wav", x, sr)
+            row = {**p, "generated": contour_metrics(tgt_f0, est(gen, sr)["f0"]),
+                   "measure": contour_metrics(tgt_f0, est(tgt, sr)["f0"]),
+                   "quant": contour_metrics(tgt_f0, quantise_like_soulx(tgt_f0))}
+            rows.append(row)
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fh.flush()
+            print(f"[{i}/{len(phrases)}] {p['title'][:28]} ({p['raga']}): generated {row['generated']} | "
+                  f"measure floor rmse {row['measure']['rmse_cents']}", flush=True)
+    summ = summarise(rows)
+    (out / "summary.json").write_text(json.dumps(summ, indent=1), encoding="utf-8")
+    print(json.dumps(summ, indent=1))
 
 
 def main(argv=None):
@@ -1339,6 +1462,22 @@ def main(argv=None):
     s.add_argument("--tol", type=float, default=40.0, help="cents")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(fn=cmd_tonic_consensus, stems_only=True)
+
+    s = sub.add_parser("report", help="dataset QC report (report.csv + report.html)")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "report"))
+    s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("svc-check", help="SoulX SVC rendering check on probe phrases (GPU)")
+    s.add_argument("--mbids", default="")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "svc_check"))
+    s.add_argument("--model", default="", help="model-svc.pt (default: SoulX repo pretrained_models/SoulX-Singer)")
+    s.add_argument("--device", default="cuda")
+    s.add_argument("--n", type=int, default=20, help="probe phrases")
+    s.add_argument("--dur", type=float, default=8.0, help="target phrase length, s")
+    s.add_argument("--prompt-s", type=float, default=20.0, help="prompt length, s")
+    s.add_argument("--n-steps", type=int, default=32, help="diffusion steps")
+    s.add_argument("--cfg", type=float, default=3.0, help="classifier-free guidance scale")
+    s.set_defaults(fn=cmd_svc_check, stems_only=True)
 
     a = p.parse_args(argv)
     a.fn(a)

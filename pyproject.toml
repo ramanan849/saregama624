@@ -14,14 +14,14 @@ dependencies = ["numpy>=1.24,<2.3", "scipy>=1.10", "soundfile>=0.12", "matplotli
 models = [
   "torch==2.5.1",
   "torchaudio==2.5.1",
-  "transformers>=4.40",
+  "transformers>=4.40,<4.42",  # SoulX-Singer is tested with 4.41.2; 5.x needs torch >= 2.6
   "torchfcpe",
   "torchcrepe",
   "librosa>=0.10",
   "einops",
   "huggingface_hub",
   # imported by SoulX-Singer's Mel-RoFormer separator (stage `stems`)
-  "ml_collections",
+  "ml_collections", "accelerate",
   "omegaconf",
   "rotary_embedding_torch",
   "beartype",

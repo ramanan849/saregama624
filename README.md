@@ -128,6 +128,8 @@ $S review-export   --mbids $P                 # 7  Sonic Visualiser layers + syn
 $S review-import   --mbids <id> --reviewer <name>
 $S export-ir                                  # 8  ICM-IR v0 dataset -> annotations/export/icm_ir_v0
 $S export-soulx                               #    SoulX clips (same splits) -> annotations/export/soulx_v0
+$S report                                     #    QC report -> annotations/report/report.{html,csv}
+$S svc-check                                  #    SoulX SVC rendering check -> annotations/svc_check  GPU
 ```
 
 `scripts/run_stages.sh <mbids-file> <gpu> [stage ...]` runs stages in order over a
@@ -205,8 +207,17 @@ duos), at the stem's own rate, length and level, so it stays sample-aligned.
 - The score is how well each explains the stable pitches of the raga, plus the
   time spent on Sa and Pa.
 - The octave is placed just below the singer's median pitch.
-- `tonic-consensus` then sets one Sa per concert. Every Saraga recording of the
-  concert votes, and ours vote ×2.
+- `tonic-consensus` then sets one Sa per concert.
+  - **Votes:** one vote per recording, not weighted by duration, so one long
+    recording with a weak guess can't outvote several confident ones. Our estimates
+    vote ×2; Saraga's ctonic for the concert's other recordings votes ×1.
+  - **Own estimate:** a recording always votes with its own estimate. Once a run
+    replaces it, that estimate is kept as `tonic_recording_hz` /
+    `tonic_recording_source`, so re-runs don't vote with their own output.
+  - **Undo:** a recording an earlier run moved, whose own estimate agrees with the
+    new consensus, gets its own tonic back.
+  - **Tolerance:** changes under 5 cents are ignored.
+  - Any change clears the recording's `swaras` stage, so `swaras` re-runs on it.
 
 **QC against Saraga.** Each of Saraga's pitch tracks is scored separately, with the
 lag searched over ±30 ms.
@@ -389,6 +400,71 @@ svara 39 %, kriti 21 %. The kriti figure is limited by lyric alignment coverage
 ### 7. `review-export`, `review-import` — `saregama/review_sv.py`
 
 See [Review in Sonic Visualiser](#review-in-sonic-visualiser).
+
+### `report` — `saregama/report.py`
+
+This is the dataset QC report. It reads every bundle's `ir.json` and
+`lyrics/status.tsv`, and writes two files to `annotations/report/` (`--out` to
+change):
+- `report.csv`: one row per recording. Raga, tala, form, minutes, duet, tonic and
+  source, where the sections and tala come from, lyric status and aligned minutes,
+  F0 agreement with Saraga (`rpa50`), voiced share, sync offset, flags, stages done.
+  For each missing stage it gives a reason.
+- `report.html`: one self-contained page. Headline numbers; stage completion (hours
+  done, and why the rest isn't); hours by raga, singer, form and lyric status;
+  outliers; and the full table, sortable by any column and filterable.
+
+### `svc-check` — `saregama/svc_check.py`
+
+This asks whether SoulX-Singer's F0 input keeps gamakas, before anyone writes a
+trainer. SoulX has no training code, and its F0 conditioning is coarse: 50 fps,
+20-cent bins.
+
+**Setup.** It needs `model-svc.pt` (2.8 GB, from `Soul-AILab/SoulX-Singer` on
+Hugging Face) in `SoulX-Singer/pretrained_models/SoulX-Singer/`, plus
+`openai/whisper-base`, which SoulX downloads itself.
+
+**Phrases.** `--n` probe phrases (default 20) are picked round-robin over ragas.
+- **Target:** the 8 s voiced window of the recording with the most gamaka frames.
+- **Prompt:** a 20 s voiced window of the same singer from elsewhere in the same
+  recording.
+
+**Render and measure.**
+- SoulX renders the target's content in the prompt's voice, following our F0
+  sampled at 50 fps (every second 100 Hz frame, never interpolated), with no pitch
+  shift.
+- The output's F0 is re-measured with the pipeline's ensemble (RMVPE, FCPE, CREPE).
+
+**Metrics** (the Feasibility Report's), against the requested F0:
+- cents RMSE on frames voiced in both;
+- the same RMSE on gamaka frames (target slope over 300 c/s);
+- Pearson r;
+- voicing recall.
+
+**Floors**, for context:
+- `measure`: the ensemble on the *original* phrase. This is the measurement error.
+- `quant`: the 20-cent quantisation of the target. This is the best SoulX's input
+  allows.
+
+**Output** in `annotations/svc_check/`: `NN_{target,prompt,generated}.wav`,
+`results.jsonl`, `summary.json` (medians).
+
+### Report: missing-stage reasons and outliers
+
+**Missing-stage reasons** follow each command's skip rules:
+- waits for the previous stage;
+- manual sections (so `sections` isn't needed);
+- no composition (alapana / tani / RTP);
+- no lyrics found yet;
+- no manual sama;
+- not run yet.
+
+**Outliers:**
+- F0 within 50 cents of Saraga's pitch on less than 50 % of frames;
+- lead voiced on less than 20 % of frames;
+- sync offset over 50 ms;
+- `sync:*` flags, `tonic_ambiguous`;
+- aligned lyrics covering less than 10 % of the recording.
 
 ## Output: the IR bundle
 
@@ -631,6 +707,8 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/review_sv.py` | Sonic Visualiser export / import, sync preview |
 | `saregama/export_ir.py` | ICM-IR v0 dataset export |
 | `saregama/export_soulx.py` | SoulX-Singer clip export (notes, akaram, clip planning) |
+| `saregama/report.py` | dataset QC report (CSV + one HTML page) |
+| `saregama/svc_check.py` | SoulX SVC rendering check: phrase picking, F0 metrics |
 | `saregama/cli.py` | all commands |
 
 **Legacy** (ported from `indic-svs-annotator`, for film songs: songs.csv workspaces,
@@ -673,6 +751,8 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_translit.py` | ISO-15919 spelling, phones, syllable fitting, notation lines |
 | `test_export_ir.py` | swara naming, svarasthana, splits, quantisation, phone track |
 | `test_export_soulx.py` | notes per syllable, short-note merging, clip planning, item format |
+| `test_svc_check.py` | 50 fps sampling, SoulX quantisation, gamaka frames, contour metrics, phrase picking |
+| `test_report.py` | report rows, missing-stage reasons, outliers, grouping, HTML escaping; one-vote-per-recording tonic consensus |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
 | `test_docs.py` | docstrings everywhere, no hard-coded paths |
