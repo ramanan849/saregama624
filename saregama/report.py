@@ -3,7 +3,9 @@
 ``saregama report`` reads every ``<ann-root>/<mbid>/ir.json`` and the lyric
 status table (``<lyrics-dir>/status.tsv``) and writes:
 
-- ``report.csv``: one row per recording (:func:`summarise`);
+- ``report.csv``: one row per recording (:func:`summarise`); ``rpa50`` is the F0
+  agreement with Saraga's *vocal* pitch track (36 recordings have one),
+  ``rpa50_mix`` with the mix-based track, which often follows the violin;
 - ``report.html``: one self-contained page (no external files) with
   headline numbers, stage completion, hours by raga / singer / form, the
   outliers that need a look, and the full per-recording table (sortable,
@@ -32,7 +34,7 @@ MIN_LYRIC_SHARE = 0.10   # aligned lyric minutes / recording minutes, for aligne
 CSV_FIELDS = ["mbid", "title", "concert", "singers", "raga", "tala", "form", "minutes", "duet",
               "tonic_hz", "tonic_source", "sections_source", "tala_source", "laya_bpm",
               "lyrics_status", "lyric_min", "align_instances", "align_mean_llr",
-              "voiced", "rpa50", "sync_offset_ms", "flags", "stages_done", "missing", "missing_reason"]
+              "voiced", "rpa50", "rpa50_mix", "sync_offset_ms", "flags", "stages_done", "missing", "missing_reason"]
 
 
 def load_lyric_status(lyrics_dir: Path) -> dict[str, str]:
@@ -63,8 +65,10 @@ def missing_reason(stage: str, ir: dict, lyric_status: str) -> str:
             return "no composition (alapana / tani / RTP)"
         if lyric_status in ("", "missing"):
             return "no lyrics found yet"
-    if stage == "tala" and (ir.get("tala") or {}).get("source") in ("none", "unknown"):
+    if stage == "tala" and (ir.get("tala") or {}).get("source") == "none":
         return "no manual sama"
+    if stage == "tala" and (ir.get("tala") or {}).get("source") == "unknown":
+        return "no tala in Saraga metadata"
     return "not run yet"
 
 
@@ -73,8 +77,11 @@ def summarise(ir: dict, lyric_status: dict[str, str]) -> dict:
     st = ir.get("stages", {})
     qc = ir.get("qc", {})
     f0 = (qc.get("f0") or {}).get("vocal_clean") or {}
-    vs = f0.get("vs_saraga") or {}
-    vs = vs.get("pitch", vs)                       # older bundles store the scores one level up
+    vs_all = f0.get("vs_saraga") or {}
+    # Saraga's vocal pitch track when it exists; the mix-based "pitch" track often
+    # follows the violin, so it is kept separately and never flagged on.
+    vs = vs_all.get("pitch-vocal") or {}
+    mix = vs_all.get("pitch") or {}
     al = qc.get("align") or {}
     tala = ir.get("tala") or {}
     ls = lyric_status.get(ir.get("work_mbid") or "", "")
@@ -98,7 +105,7 @@ def summarise(ir: dict, lyric_status: dict[str, str]) -> dict:
         "lyrics_status": ("no composition" if not ir.get("work_mbid") else (ls or "missing")),
         "lyric_min": round((al.get("lyric_s") or 0) / 60, 2), "align_instances": al.get("instances"),
         "align_mean_llr": al.get("mean_llr"),
-        "voiced": f0.get("voiced"), "rpa50": vs.get("rpa50"),
+        "voiced": f0.get("voiced"), "rpa50": vs.get("rpa50"), "rpa50_mix": mix.get("rpa50"),
         "sync_offset_ms": (st.get("sync") or {}).get("offset_ms"),
         "flags": "; ".join(map(str, ir.get("flags") or [])),
         "stages_done": ", ".join(s for s in STAGES if s in st),
@@ -111,7 +118,7 @@ def outliers(row: dict) -> list[str]:
     """Problems worth a look in one report row (empty list if none)."""
     out = []
     if row["rpa50"] is not None and row["rpa50"] < MIN_RPA50:
-        out.append(f"F0 agrees with Saraga only {row['rpa50']:.0%} within 50 c")
+        out.append(f"F0 agrees with Saraga's vocal pitch only {row['rpa50']:.0%} within 50 c")
     if row["voiced"] is not None and row["voiced"] < MIN_VOICED:
         out.append(f"lead voiced only {row['voiced']:.0%} of the time")
     if row["sync_offset_ms"] is not None and abs(row["sync_offset_ms"]) > MAX_OFFSET_MS:

@@ -312,6 +312,22 @@ def lyrics_from_layers(lines: List[dict], words: List[dict], syls: List[dict]) -
     return insts, problems
 
 
+def snapshot_predictions(b: Bundle, ir: dict) -> bool:
+    """Copy the pipeline's predictions into ``pred/`` unless already there
+    (the first review import keeps them; later imports leave them alone).
+    Returns True if a snapshot was written."""
+    pred = b.dir / "pred"
+    if (pred / "ir_pred.json").exists():
+        return False
+    pred.mkdir(exist_ok=True)
+    for name in ("lyrics.json", "lyrics_vocal-s.json"):
+        if b.path(name).exists():
+            (pred / name).write_bytes(b.path(name).read_bytes())
+    keep = {k: ir.get(k) for k in ("sections", "sections_auto", "sama", "tonic_hz", "tala")}
+    (pred / "ir_pred.json").write_text(json.dumps(keep, ensure_ascii=False), encoding="utf-8")
+    return True
+
+
 def import_review(b: Bundle, reviewer: str = "", corrected: Optional[Path] = None) -> dict:
     """Read corrected layers from ``corrected`` (default
     ``review/corrected/``) back into the bundle.
@@ -320,12 +336,18 @@ def import_review(b: Bundle, reviewer: str = "", corrected: Optional[Path] = Non
     sections and sama replace the Saraga ones.  The recording is marked
     ``status = reviewed`` (``align`` then skips it).  Returns a report with the
     layers read, the number of instances and any problems found.
+
+    Before anything is overwritten, the pipeline's predictions are kept in
+    ``pred/`` (``lyrics.json`` and ``ir_pred.json`` with sections, auto sections,
+    sama and tonic) on the first import only, so ``gold-eval`` can score them
+    against the corrections later.
     """
     src = corrected or (b.review_dir / "corrected")
     have = {n: src / f"{n}.svl" for n in EDITABLE if (src / f"{n}.svl").exists()}
     if not have:
         raise FileNotFoundError(f"no corrected layers in {src}")
     ir = b.load()
+    snapshot_predictions(b, ir)
     report = {"layers": sorted(have)}
     if {"lines", "words", "syllables"} <= set(have):
         lyr = json.loads(b.path("lyrics.json").read_text(encoding="utf-8")) if b.path("lyrics.json").exists() else {}

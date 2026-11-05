@@ -63,7 +63,7 @@ RAGAS: Dict[str, str] = {
     "saurastram": "S r G m P D n N", "karnataka devagandhari": "S R g m P D n",
     "hamir kalyani": "S R G m M P D N", "hamirkalyani": "S R G m M P D N",
     "manji": "S R g m P d D n", "suddha dhanyasi": "S g m P n", "sucaritra": "S g G M P d D",
-    "mandu": "S R G m P D n N", "ragamalika": "",
+    "mandu": "S R G m P D n N", "sri": "S R g m P D n", "ragamalika": "",
 }
 
 

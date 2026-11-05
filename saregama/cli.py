@@ -27,6 +27,8 @@ redoes recordings already done):
     export-soulx      SoulX-Singer training clips (melody mode)
     report            dataset QC report: report.csv + report.html
     svc-check         SoulX SVC rendering check: does its F0 input keep gamakas? (GPU)
+    varnam-eval       swara segmentation + tonic scored on Carnatic-Varnam    (GPU)
+    gold-eval         predictions vs hand-corrected (reviewed) recordings
 
 Global options ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` default to
 the locations in :mod:`saregama.paths`.
@@ -48,7 +50,7 @@ from pathlib import Path
 
 from .config import load_config
 from .ir import DEFAULT_ROOT as ANN_ROOT
-from .paths import LYRICS_DIR
+from .paths import CARNATIC_VARNAM, LYRICS_DIR
 from .saraga import DEFAULT_ROOT as SARAGA_ROOT
 
 SONGS_HEADER = ["song_id", "audio", "language", "lyrics", "style", "singer_id", "gender",
@@ -1292,6 +1294,95 @@ def cmd_svc_check(a):
     print(json.dumps(summ, indent=1))
 
 
+def cmd_varnam_eval(a):
+    """``varnam-eval``: run our F0, tonic and swara segmentation on the 28
+    Carnatic-Varnam recordings and score them against the notation laid onto the
+    tala ticks (see :mod:`saregama.varnam_eval`).
+
+    Segmentation uses the dataset's tonic, so its score doesn't inherit tonic
+    errors; our own tonic estimate is scored separately. F0 is cached in
+    ``<out>/f0/``. Writes ``results.jsonl`` and ``summary.json``.
+    """
+    import numpy as np
+    from .audio import load_audio
+    from .config import F0Cfg
+    from .stages.f0 import F0Estimator
+    from .stages.f0_ir import choose_tonic
+    from .stages.swaras import segment, to_json
+    from .varnam_eval import (expected_notes, notation_sections, parse_structure, parse_ticks, recordings, score,
+                              tick_spans)
+    out = Path(a.out)
+    (out / "f0").mkdir(parents=True, exist_ok=True)
+    est = None
+    rows = []
+    recs = recordings(Path(a.root))
+    for i, r in enumerate(recs, 1):
+        cache = out / "f0" / f"{r['raga']}_{r['singer']}.npz"
+        if cache.exists():
+            f0 = np.load(cache)["f0_hz"]
+        else:
+            est = est or F0Estimator(F0Cfg(backends=["rmvpe", "fcpe", "crepe"], device=a.device), fps=100.0)
+            f0 = est(load_audio(r["audio"]))["f0"]
+            np.savez_compressed(cache, f0_hz=f0)
+        ours, src, _ = choose_tonic(f0, None, r["raga"])
+        tonic_err = (1200 * np.log2(ours / r["tonic_hz"]) + 600) % 1200 - 600 if ours else None
+        cents = np.full(len(f0), np.nan)
+        v = f0 > 0
+        cents[v] = 1200 * np.log2(f0[v] / r["tonic_hz"])
+        segs, pos = segment(cents, r["raga"], 100.0)
+        t, _ = parse_ticks(r["ticks"])
+        notes, rep = expected_notes(notation_sections(r["notation"]), parse_structure(r["structure"]), tick_spans(t))
+        sc = score(notes, to_json(segs, pos, r["raga"])["segments"], len(f0))
+        row = {"raga": r["raga"], "singer": r["singer"], **sc, **rep,
+               "tonic_err_cents": round(float(tonic_err), 1) if tonic_err is not None else None, "tonic_source": src}
+        rows.append(row)
+        print(f"[{i}/{len(recs)}] {json.dumps(row)}", flush=True)
+    with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    keys = ["labelled_share", "label_accuracy", "label_accuracy_any_octave", "onset_hit_100ms", "onset_hit_200ms", "onset_median_err_ms"]
+    summ = {"recordings": len(rows), "notes": sum(r["notes"] for r in rows),
+            **{k: round(float(np.median([r[k] for r in rows if r[k] is not None])), 3) for k in keys},
+            "tonic_within_20c": round(float(np.mean([abs(r["tonic_err_cents"] or 1e9) <= 20 for r in rows])), 3),
+            "by_raga": {g: {k: round(float(np.median([r[k] for r in rows if r["raga"] == g])), 3)
+                            for k in ("label_accuracy", "label_accuracy_any_octave")}
+                        for g in sorted({r["raga"] for r in rows})}}
+    (out / "summary.json").write_text(json.dumps(summ, indent=1), encoding="utf-8")
+    print(json.dumps(summ, indent=1))
+
+
+def cmd_gold_eval(a):
+    """``gold-eval``: score the predictions kept in ``pred/`` of every reviewed
+    bundle against its corrections (see :mod:`saregama.gold_eval`). Writes
+    ``results.jsonl`` and ``summary.json`` to ``--out``."""
+    import numpy as np
+    from .gold_eval import evaluate_bundle
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = [r for p in sorted(Path(a.ann_root).glob("*/ir.json"))
+            if json.loads(p.read_text(encoding="utf-8")).get("status") == "reviewed"
+            for r in [evaluate_bundle(p.parent)] if r]
+    with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            print(json.dumps(r, ensure_ascii=False), flush=True)
+
+    def med(part, key):
+        """Median of ``row[part][key]`` over the rows that have it."""
+        v = [r[part][key] for r in rows if r.get(part) and r[part].get(key) is not None]
+        return round(float(np.median(v)), 3) if v else None
+
+    summ = {"recordings": len(rows),
+            "syllables": {k: med("syllables", k) for k in ("recall", "median_abs_err_ms", "within_50ms",
+                                                            "within_100ms")},
+            "instances": {k: med("instances", k) for k in ("precision", "recall", "f1")},
+            "sections": {"accuracy": med("sections", "accuracy")}, "sama": {"hit_70ms": med("sama", "hit_70ms")}}
+    (out / "summary.json").write_text(json.dumps(summ, indent=1), encoding="utf-8")
+    print(json.dumps(summ, indent=1))
+    if not rows:
+        print("no reviewed recordings with a pred/ snapshot yet (correct some with review-export / review-import)")
+
+
 def main(argv=None):
     """Parse the command line and run the chosen command."""
     p = argparse.ArgumentParser(prog="saregama", description=__doc__)
@@ -1513,6 +1604,16 @@ def main(argv=None):
     s.add_argument("--cfg", type=float, default=3.0, help="classifier-free guidance scale")
     s.add_argument("--rescore", action="store_true", help="re-measure the saved wavs; render nothing")
     s.set_defaults(fn=cmd_svc_check, stems_only=True)
+
+    s = sub.add_parser("varnam-eval", help="score swara segmentation + tonic on Carnatic-Varnam (GPU)")
+    s.add_argument("--root", default=str(CARNATIC_VARNAM), help="carnatic_varnam_1.1 folder")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "eval" / "varnam"))
+    s.add_argument("--device", default="cuda")
+    s.set_defaults(fn=cmd_varnam_eval)
+
+    s = sub.add_parser("gold-eval", help="score predictions against hand-corrected recordings")
+    s.add_argument("--out", default=str(ANN_ROOT.parent / "eval" / "gold"))
+    s.set_defaults(fn=cmd_gold_eval)
 
     a = p.parse_args(argv)
     a.fn(a)

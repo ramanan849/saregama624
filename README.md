@@ -28,8 +28,10 @@ SoulX-Singer fine-tuning clips.
 
 ## Status
 
-Steps 1–7 run end to end on a 10-recording pilot
-(`annotations/carnatic/pilot_mbids.txt`).
+All 168 Saraga Carnatic multitrack recordings (36.3 h) have been run through
+alignment; `saregama report` gives the per-recording state
+(`annotations/report/report.html`). The 10-recording pilot
+(`annotations/carnatic/pilot_mbids.txt`) was the development set.
 
 | Step | Command(s) | Pilot result |
 |---|---|---|
@@ -42,7 +44,21 @@ Steps 1–7 run end to end on a 10-recording pilot
 | 7 Review | `review-export`, `review-import` | Sonic Visualiser layers + sync preview; lossless round trip |
 | 8 Export | `export-ir`, `export-soulx` | ICM-IR v0 dataset; SoulX clips (pilot: 243 clips, 0.65 h, all pass SoulX's frame/phone checks) |
 
-The 168 multitrack recordings have not been run yet; only the pilot has.
+**Full run (168 recordings):**
+- sync, stems, F0, swaras: all 168.
+- Sections: 46 manual, 122 automatic. Leave-one-concert-out frame accuracy is
+  81 %; most confusion is kriti vs kalpana svara.
+- Tala grid: 58 recordings from manual sama, 54 with no sama, 56 with no tala in
+  Saraga's metadata.
+- Aligned lyrics: 78 recordings, 6.0 h. 66 recordings have no lyrics yet; 24 are
+  not compositions (alapana, tani, RTP).
+- QC: 24 recordings flagged, all with sync or tonic flags. None disagrees with
+  Saraga's vocal pitch track.
+
+**Evaluations:**
+- `svc-check`: SoulX follows our F0 with r 0.99 but 43 cents RMSE.
+- `varnam-eval`: tonic 28 / 28 within 20 cents; swara labels 66 % against the
+  notation (octave-free).
 
 ## Setup
 
@@ -130,6 +146,8 @@ $S export-ir                                  # 8  ICM-IR v0 dataset -> annotati
 $S export-soulx                               #    SoulX clips (same splits) -> annotations/export/soulx_v0
 $S report                                     #    QC report -> annotations/report/report.{html,csv}
 $S svc-check                                  #    SoulX SVC rendering check -> annotations/svc_check  GPU
+$S varnam-eval                                #    segmentation + tonic on Carnatic-Varnam   GPU
+$S gold-eval                                  #    predictions vs hand-corrected recordings
 ```
 
 `scripts/run_stages.sh <mbids-file> <gpu> [stage ...]` runs stages in order over a
@@ -469,6 +487,57 @@ the shape error. `--rescore` re-measures the saved wavs without rendering.
 - So the conditioning keeps gamakas but blurs them. A fine-tune on this data would
   have to close that gap; the input encoding (6 cents) isn't the limit.
 
+### `varnam-eval` — `saregama/varnam_eval.py`
+
+This scores our F0, tonic and swara segmentation on **Carnatic-Varnam 1.1**: 28
+solo varnams, 7 ragas, 5 singers, drone only, with machine-readable notation and
+tala ticks (`Datasets/Carnatic-Varnam/`, override with `SAREGAMA_VARNAM`).
+
+**Expected svaras.** The notation is laid onto the ticks in sung order. The
+structure file gives each section and its speed (2 or 4 svaras per tick); svaras
+are evenly spaced inside a tick, and `,` extends the previous svara. On all 28
+recordings this uses exactly every annotated tick.
+
+**Scoring.** Segmentation uses the dataset's tonic, so it doesn't inherit tonic
+errors; our own tonic is scored separately. F0 is cached in
+`annotations/eval/varnam/f0/`.
+
+**Result** (medians over the 28 recordings, 27,731 notated svaras):
+
+| | |
+|---|---|
+| tonic within 20 cents | 28 / 28 |
+| notes with a steady (stable) stretch we labelled | 24 % |
+| label accuracy on those, octave included / any octave | 52 % / 66 % |
+| notated svara changes with a matching onset within 100 / 200 ms | 5 % / 10 % (median error 107 ms) |
+| label accuracy by raga (any octave) | Mohanam 81, Sri 72, Abhogi 71, Saveri 62, Sahana 61, Begada 58, Kalyani 44 % |
+
+**How to read this.** These numbers measure how far *notation* is from *what is
+sung*, not only our error:
+- Most notated svaras are sung as gamakas with no steady part (76 % unlabelled).
+- The steady parts often sit on a neighbour. In Abhogi, notated G is held on R or
+  M; notated D on the upper S. Koduri et al. found the same on this dataset.
+- The octave marks are incomplete: an ascending "N S" usually means the upper S,
+  unmarked. Kalyani's strict score (24 %) rises to 44 % ignoring octave.
+- Note times inside a tick are only evenly spaced guesses, so onset scores are a
+  lower bound.
+
+The ragas sung with plainer svaras (Mohanam, Abhogi) score best.
+
+### `gold-eval` — `saregama/gold_eval.py`
+
+This scores the pipeline against hand-corrected recordings.
+- **Snapshot:** `review-import` first keeps the predictions in `<bundle>/pred/`
+  (`lyrics.json`, `ir_pred.json` with sections, auto sections, sama, tonic). That
+  happens on the first import only, and they are never overwritten.
+- **What it reports,** per reviewed bundle and as medians:
+  - syllable onsets: recall, median error, share within 50 / 100 ms;
+  - line instances: precision, recall and F1 (same line, IoU ≥ 0.5);
+  - section frame accuracy;
+  - sama hit rate within 70 ms.
+- **Output:** `annotations/eval/gold/{results.jsonl,summary.json}`.
+- Nothing is reviewed yet, so there are no numbers.
+
 ### Report: missing-stage reasons and outliers
 
 **Missing-stage reasons** follow each command's skip rules:
@@ -477,10 +546,13 @@ the shape error. `--rescore` re-measures the saved wavs without rendering.
 - no composition (alapana / tani / RTP);
 - no lyrics found yet;
 - no manual sama;
+- no tala in Saraga metadata;
 - not run yet.
 
 **Outliers:**
-- F0 within 50 cents of Saraga's pitch on less than 50 % of frames;
+- F0 within 50 cents of Saraga's *vocal* pitch track on less than 50 % of frames (36
+  recordings have that track; the mix-based track, which often follows the violin,
+  is reported as `rpa50_mix` but never flagged on);
 - lead voiced on less than 20 % of frames;
 - sync offset over 50 ms;
 - `sync:*` flags, `tonic_ambiguous`;
@@ -729,6 +801,8 @@ ticks drift away from the voice, sync or alignment is off.
 | `saregama/export_soulx.py` | SoulX-Singer clip export (notes, akaram, clip planning) |
 | `saregama/report.py` | dataset QC report (CSV + one HTML page) |
 | `saregama/svc_check.py` | SoulX SVC rendering check: phrase picking, F0 metrics |
+| `saregama/varnam_eval.py` | Carnatic-Varnam: notation laid onto tala ticks, segmentation scores |
+| `saregama/gold_eval.py` | predictions (`pred/`) vs hand corrections: onsets, instances, sections, sama |
 | `saregama/cli.py` | all commands |
 
 **Legacy** (ported from `indic-svs-annotator`, for film songs: songs.csv workspaces,
@@ -772,6 +846,8 @@ annotator network), `configs/default.toml`, `lexicons/common.tsv`.
 | `test_export_ir.py` | swara naming, svarasthana, splits, quantisation, phone track |
 | `test_export_soulx.py` | notes per syllable, short-note merging, clip planning, item format |
 | `test_svc_check.py` | 50 fps sampling, SoulX quantisation, gamaka frames, contour metrics, phrase picking |
+| `test_varnam_eval.py` | structure parsing with repeated keys, tick spans, notation on ticks, scoring |
+| `test_gold_eval.py` | syllable matching, instance P/R, sections, sama, the review-import snapshot |
 | `test_report.py` | report rows, missing-stage reasons, outliers, grouping, HTML escaping; one-vote-per-recording tonic consensus |
 | `test_pipeline.py` | legacy end to end on synthetic songs (G2P → … → SoulX format) |
 | `test_annotator.py` | legacy annotator train / load / run smoke test |
@@ -794,8 +870,9 @@ No test needs a GPU or a model download.
   the percussion-based estimator is not reliable (median beat F 0.29).
 
 **Next steps**
-1. The Probe-40 Carnatic set, and an SVC rendering check: does SoulX's F0 conditioning
-   keep gamakas?
-2. Run all 168 multitrack recordings.
-3. About 5 hand-corrected gold recordings, plus a Carnatic-Varnam onset evaluation.
+1. Lyric review on the shared page, then `lyrics-apply` and `align --force` on the
+   affected recordings.
+2. About 5 hand-corrected gold recordings, then `gold-eval`.
+3. The Probe-40 Carnatic set, once lyrics are verified.
+4. The mix-only Saraga recordings, then Saraga Hindustani.
 4. Phase 2: the 81 recordings without stems (mix separation), then Hindustani.

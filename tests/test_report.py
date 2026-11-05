@@ -12,7 +12,7 @@ def _ir(**kw):
           "raaga": "Tōḍi", "taala": "Ādi", "form": "Kriti", "length_s": 600.0, "work_mbid": "w1",
           "tonic_hz": 140.0, "tonic_source": "saraga_ctonic", "sections": [{"label": "Pallavi"}],
           "stems": {"vocal_clean": {}}, "flags": [],
-          "qc": {"f0": {"vocal_clean": {"voiced": 0.6, "vs_saraga": {"pitch": {"rpa50": 0.9}}}}},
+          "qc": {"f0": {"vocal_clean": {"voiced": 0.6, "vs_saraga": {"pitch-vocal": {"rpa50": 0.9}}}}},
           "stages": {"sync": {"offset_ms": 2.0}, "stems": {}, "f0": {}}}
     ir.update(kw)
     return ir
@@ -34,7 +34,7 @@ def test_outliers():
     """Low pitch agreement, sync flags and big offsets are flagged; a clean row is not."""
     assert outliers(summarise(_ir(), {})) == []
     bad = _ir(flags=["sync:no_tight_stem"], stages={"sync": {"offset_ms": 80.0}, "f0": {}},
-              qc={"f0": {"vocal_clean": {"voiced": 0.1, "vs_saraga": {"rpa50": 0.3}}}})
+              qc={"f0": {"vocal_clean": {"voiced": 0.1, "vs_saraga": {"pitch-vocal": {"rpa50": 0.3}}}}})
     out = " | ".join(outliers(summarise(bad, {})))
     for part in ("30%", "voiced only 10%", "80 ms", "sync:no_tight_stem"):
         assert part in out

@@ -17,6 +17,7 @@ overridden with an environment variable (useful when the data sits elsewhere):
 ``SAREGAMA_SOULX``          SoulX-Singer clone
 ``SAREGAMA_SARAGA``         Saraga Carnatic root (``saraga1.5_carnatic``)
 ``SAREGAMA_ANNOTATIONS``    annotation output root (holds ``carnatic/``, ``lyrics/``)
+``SAREGAMA_VARNAM``         Carnatic-Varnam 1.1 root (evaluation only)
 ==========================  ==============================================
 
 The CLI's ``--saraga-root``, ``--ann-root`` and ``--lyrics-dir`` override these
@@ -42,3 +43,5 @@ SARAGA_CARNATIC = _env("SAREGAMA_SARAGA", PROJECT / "Datasets" / "Saraga" / "fil
 ANNOTATIONS = _env("SAREGAMA_ANNOTATIONS", PROJECT / "annotations")
 ANN_CARNATIC = ANNOTATIONS / "carnatic"          # one IR bundle per recording
 LYRICS_DIR = ANNOTATIONS / "lyrics"              # one YAML per composition (work)
+CARNATIC_VARNAM = _env("SAREGAMA_VARNAM", PROJECT / "Datasets" / "Carnatic-Varnam" / "files"
+                       / "carnatic_varnam_1.1")      # 28 solo varnams with notation (evaluation)
