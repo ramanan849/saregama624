@@ -858,16 +858,18 @@ No test needs a GPU or a model download.
 ## Known limitations and next steps
 
 **Limitations**
-- **Lyrics.** 61 of 133 compositions have no lyrics yet. None of the 72 auto-matched
-  ones have been verified by a person.
+- **Lyrics.** 60 of 133 compositions have no lyrics yet. None of the 73 auto-matched
+  ones have been verified by a person (the shared review page is for that).
 - **Alignment.**
   - It covers 160–450 s of lyrics per recording; heavy melisma still drops out.
-  - It has not been measured against hand labels.
-  - Known errors on the pilot: one false line match in Mati Matiki (around 1193 s)
-    and a parse artifact in Dinamani Vamsa ("sarvasvamau").
+  - It has not been measured against hand labels (`gold-eval` is ready for them).
+- **Sections.** Automatic sections are 81 % right per frame (leave-one-concert-out);
+  kriti and kalpana svara are the usual confusion.
 - **Tonic.** Recordings flagged `tonic_ambiguous` need a listen.
-- **Tala.** Matra and sam exist only for the 63 recordings with annotated samas (13 h);
-  the percussion-based estimator is not reliable (median beat F 0.29).
+- **Tala.** Matra and sam exist only for the 58 recordings with annotated samas
+  (12.8 h); the percussion-based estimator is not reliable (median beat F 0.29).
+- **SoulX.** Its SVC model follows our F0 shape but misses gamaka depth by about
+  40 cents (`svc-check`).
 
 **Next steps**
 1. Lyric review on the shared page, then `lyrics-apply` and `align --force` on the
