@@ -449,6 +449,26 @@ Hugging Face) in `SoulX-Singer/pretrained_models/SoulX-Singer/`, plus
 **Output** in `annotations/svc_check/`: `NN_{target,prompt,generated}.wav`,
 `results.jsonl`, `summary.json` (medians).
 
+**Extra metrics.** A constant transposition (`offset_cents`, `rmse_shape_cents`) and
+a time lag of up to ±100 ms (`lag_ms`, `rmse_lagged_cents`) are reported apart from
+the shape error. `--rescore` re-measures the saved wavs without rendering.
+
+**Result** (20 phrases, 20 ragas, the most gamaka-dense 8 s window of each):
+
+| | cents RMSE | gamaka RMSE | Pearson r | voicing recall |
+|---|---|---|---|---|
+| SoulX output vs our F0 | 43 | 41 | 0.992 | 0.999 |
+| measurement floor | 5 | 5 | 1.000 | 1.000 |
+| 20-cent quantisation floor | 6 | 6 | 1.000 | 1.000 |
+
+- The output follows the contour's shape and timing: no lag (median 0 ms) and no
+  offset (−1 cent).
+- It misses the exact gamaka depth by about 40 cents, 7–8× the measurement floor.
+  The range is 26–106 cents; Brova Barama is the worst, at 49 cents after its 20 ms
+  lag is removed.
+- So the conditioning keeps gamakas but blurs them. A fine-tune on this data would
+  have to close that gap; the input encoding (6 cents) isn't the limit.
+
 ### Report: missing-stage reasons and outliers
 
 **Missing-stage reasons** follow each command's skip rules:

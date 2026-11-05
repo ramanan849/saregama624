@@ -1175,12 +1175,43 @@ def cmd_report(a):
     print(f"{len(rows)} recordings -> {Path(a.out) / 'report.html'}, {Path(a.out) / 'report.csv'}")
 
 
+def rescore_svc(a, out, phrases):
+    """Re-measure the saved ``NN_{target,generated}.wav`` of a previous
+    ``svc-check`` run and rewrite ``results.jsonl`` / ``summary.json``."""
+    import numpy as np
+    import soundfile as sf
+    from .config import F0Cfg
+    from .ir import Bundle
+    from .stages.f0 import F0Estimator
+    from .svc_check import SOULX_FPS, at_50fps, contour_metrics, quantise_like_soulx, summarise
+    est = F0Estimator(F0Cfg(backends=["rmvpe", "fcpe", "crepe"], device=a.device), fps=SOULX_FPS)
+    rows = []
+    for i, p in enumerate(phrases, 1):
+        f0 = np.load(Bundle(a.ann_root, p["mbid"]).path("f0_100hz.npz"))["f0_hz"]
+        tgt_f0 = at_50fps(f0[int(p["target_start"] * 100):int((p["target_start"] + p["dur"]) * 100)])
+        gen, sr = sf.read(out / f"{i:02d}_generated.wav", dtype="float32")
+        tgt, _ = sf.read(out / f"{i:02d}_target.wav", dtype="float32")
+        row = {**p, "generated": contour_metrics(tgt_f0, est(gen, sr)["f0"]),
+               "measure": contour_metrics(tgt_f0, est(tgt, sr)["f0"]),
+               "quant": contour_metrics(tgt_f0, quantise_like_soulx(tgt_f0))}
+        rows.append(row)
+        print(f"[{i}/{len(phrases)}] {p['title'][:28]}: {row['generated']}", flush=True)
+    with (out / "results.jsonl").open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    summ = summarise(rows)
+    (out / "summary.json").write_text(json.dumps(summ, indent=1), encoding="utf-8")
+    print(json.dumps(summ, indent=1))
+
+
 def cmd_svc_check(a):
     """``svc-check``: render probe phrases with SoulX-Singer's SVC model following
     our F0, re-measure the output's F0 and score it (see :mod:`saregama.svc_check`).
 
     Writes ``<out>/<i>_{target,prompt,generated}.wav`` (24 kHz), ``results.jsonl``
-    (phrases and metrics) and ``summary.json`` (medians over phrases).
+    (phrases and metrics) and ``summary.json`` (medians over phrases).  With
+    ``--rescore`` nothing is rendered: the saved wavs of the previous run are
+    re-measured and re-scored (e.g. after a metric change).
     """
     import os
     import numpy as np
@@ -1206,6 +1237,9 @@ def cmd_svc_check(a):
                      "f0": np.load(b.path("f0_100hz.npz"))["f0_hz"]})
     phrases = pick_phrases(recs, PhraseCfg(n=a.n, dur=a.dur, prompt_s=a.prompt_s))
     print(f"{len(phrases)} phrases from {len({p['raga'] for p in phrases})} ragas", flush=True)
+    if a.rescore:
+        rescore_svc(a, out, phrases)
+        return
 
     sys.path.insert(0, str(SOULX_REPO))
     from cli.inference_svc import build_model                       # SoulX-Singer repo
@@ -1477,6 +1511,7 @@ def main(argv=None):
     s.add_argument("--prompt-s", type=float, default=20.0, help="prompt length, s")
     s.add_argument("--n-steps", type=int, default=32, help="diffusion steps")
     s.add_argument("--cfg", type=float, default=3.0, help="classifier-free guidance scale")
+    s.add_argument("--rescore", action="store_true", help="re-measure the saved wavs; render nothing")
     s.set_defaults(fn=cmd_svc_check, stems_only=True)
 
     a = p.parse_args(argv)

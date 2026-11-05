@@ -35,6 +35,7 @@ import numpy as np
 SOULX_FPS = 50.0               # SoulX's F0 / mel frame rate (24 kHz, hop 480)
 F0_BIN_CENTS = 20.0            # SoulX's coarse F0 bin width
 GAMAKA_CENTS_PER_S = 300.0     # target slope above which a frame counts as gamaka
+MAX_LAG_FRAMES = 5             # lag search for the output, frames (+-100 ms at 50 fps)
 
 
 @dataclass
@@ -106,7 +107,32 @@ def contour_metrics(ref_hz: np.ndarray, out_hz: np.ndarray, fps: float = SOULX_F
 
     r = float(np.corrcoef(ref_c[both], out_c[both])[0, 1]) if both.sum() > 2 else None
     ref_v = np.isfinite(ref_c)
+    # A constant pitch offset (a transposed but otherwise faithful rendering) is
+    # reported apart from the shape error: the median offset, and RMSE after it
+    # is removed.
+    bias = float(np.median(err[both])) if both.any() else 0.0
+    shape_err = err - bias
+
+    def rmse_shape(mask):
+        """RMSE over ``mask`` after removing the median offset (None if empty)."""
+        return round(float(np.sqrt(np.mean(shape_err[mask] ** 2))), 1) if mask.any() else None
+
+    # A time lag (output late/early by a few frames) is likewise separated: the
+    # shift within +-MAX_LAG_FRAMES that minimises RMSE, and the RMSE at that shift.
+    best_lag, best = 0, rmse(both)
+    for lag in range(-MAX_LAG_FRAMES, MAX_LAG_FRAMES + 1):
+        if lag == 0:
+            continue
+        a_, b_ = (ref_c[:n - lag], out_c[lag:]) if lag > 0 else (ref_c[-lag:], out_c[:n + lag])
+        ok = np.isfinite(a_) & np.isfinite(b_)
+        if ok.sum() > 0.5 * both.sum():
+            e = float(np.sqrt(np.mean((b_[ok] - a_[ok]) ** 2)))
+            if best is None or e < best:
+                best_lag, best = lag, round(e, 1)
     return {"rmse_cents": rmse(both), "rmse_gamaka_cents": rmse(gam),
+            "lag_ms": round(1000 * best_lag / fps), "rmse_lagged_cents": best,
+            "offset_cents": round(bias, 1), "rmse_shape_cents": rmse_shape(both),
+            "rmse_shape_gamaka_cents": rmse_shape(gam),
             "pearson_r": round(r, 4) if r is not None else None,
             "voicing_recall": round(float(both.sum() / max(ref_v.sum(), 1)), 3),
             "gamaka_share": round(float(gam.sum() / max(both.sum(), 1)), 3),
@@ -179,7 +205,8 @@ def summarise(rows: list[dict]) -> dict:
     out = {"phrases": len(rows), "ragas": len({r["raga"] for r in rows})}
     for kind in ("generated", "measure", "quant"):
         out[kind] = {}
-        for k in ("rmse_cents", "rmse_gamaka_cents", "pearson_r", "voicing_recall"):
+        for k in ("rmse_cents", "rmse_gamaka_cents", "lag_ms", "rmse_lagged_cents", "offset_cents", "rmse_shape_cents",
+                  "rmse_shape_gamaka_cents", "pearson_r", "voicing_recall"):
             v = [r[kind][k] for r in rows if r.get(kind) and r[kind].get(k) is not None]
             out[kind][k] = round(float(np.median(v)), 3) if v else None
     return out
